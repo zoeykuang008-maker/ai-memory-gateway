@@ -24,7 +24,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, ensure_conversation_titles_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch
 from memory_extractor import extract_memories, score_memories
 
 # ============================================================
@@ -54,18 +54,6 @@ MAX_MEMORIES_INJECT = int(os.getenv("MAX_MEMORIES_INJECT", "15"))
 
 # 记忆提取间隔（0 = 禁用自动提取，1 = 每轮提取，N = 每 N 轮提取一次）
 MEMORY_EXTRACT_INTERVAL = int(os.getenv("MEMORY_EXTRACT_INTERVAL", "1"))
-
-# 记忆提取+注入总开关（false时数据库仍连接、消息仍存储，但不提取也不注入记忆）
-MEMORY_EXTRACT_ENABLED = os.getenv("MEMORY_EXTRACT_ENABLED", "true").lower() == "true"
-
-# 分区缓存
-CACHE_PARTITION_ENABLED = os.getenv("CACHE_PARTITION_ENABLED", "false").lower() == "true"
-CACHE_PARTITION_X = int(os.getenv("CACHE_PARTITION_X", "15"))
-CACHE_SUMMARY_MODEL = os.getenv("CACHE_SUMMARY_MODEL", "anthropic/claude-haiku-4.5")
-PARTITION_SESSION_ID = os.getenv("PARTITION_SESSION_ID", "")
-
-def get_active_session_id() -> str:
-    return PARTITION_SESSION_ID
 
 # 时区偏移（小时），用于记忆注入时的日期显示，默认 UTC+8
 TIMEZONE_HOURS = int(os.getenv("TIMEZONE_HOURS", "8"))
@@ -117,27 +105,11 @@ else:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用启动时初始化数据库，关闭时断开连接"""
-    global PARTITION_SESSION_ID
     if MEMORY_ENABLED:
         try:
             await init_tables()
-            await ensure_token_usage_table()
-            await ensure_conversation_titles_table()
             count = await get_all_memories_count()
             print(f"✅ 记忆系统已启动，当前记忆数量：{count}")
-            if not MEMORY_EXTRACT_ENABLED:
-                print(f"ℹ️  记忆提取+注入已关闭（MEMORY_EXTRACT_ENABLED=false）")
-            
-            # 分区缓存：从DB读取活跃对话线ID
-            if CACHE_PARTITION_ENABLED:
-                db_sid = await get_gateway_config("partition_session_id", "")
-                if db_sid:
-                    PARTITION_SESSION_ID = db_sid
-                    print(f"🔗 活跃对话线(DB): {PARTITION_SESSION_ID}")
-                elif PARTITION_SESSION_ID:
-                    await set_gateway_config("partition_session_id", PARTITION_SESSION_ID)
-                    print(f"🔗 活跃对话线(ENV→DB): {PARTITION_SESSION_ID}")
-                print(f"🔒 分区缓存已启用: X={CACHE_PARTITION_X}, 摘要模型={CACHE_SUMMARY_MODEL}")
         except Exception as e:
             print(f"⚠️  数据库初始化失败: {e}")
             print("⚠️  记忆系统将不可用，但网关仍可正常转发")
@@ -167,7 +139,7 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
     1. 用用户消息搜索相关记忆
     2. 格式化成文本拼接到人设后面
     """
-    if not MEMORY_ENABLED or not MEMORY_EXTRACT_ENABLED:
+    if not MEMORY_ENABLED:
         return SYSTEM_PROMPT
     
     try:
@@ -219,300 +191,10 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
 
 
 # ============================================================
-# 分区缓存（Partition Cache）
-# ============================================================
-
-def build_time_injection() -> str:
-    """构建时间注入文本（东八区）"""
-    now_utc = datetime.now(timezone.utc)
-    now_local = now_utc + timedelta(hours=TIMEZONE_HOURS)
-    weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-    weekday = weekday_names[now_local.weekday()]
-    time_str = now_local.strftime("%Y年%m月%d日 %H:%M")
-    return f"【当前时间】{time_str} {weekday}"
-
-
-async def generate_summary(messages: list, session_id: str = "") -> str:
-    """调用轻量模型压缩A区消息为摘要"""
-    if not messages:
-        return ""
-    
-    conversation_text = ""
-    for msg in messages:
-        role_label = "用户" if msg['role'] == 'user' else "AI"
-        content = msg['content'] if isinstance(msg['content'], str) else str(msg['content'])
-        conversation_text += f"{role_label}: {content}\n\n"
-    
-    prompt = f"""请将以下对话压缩成简洁摘要。保留关键信息（事件、决定、情感、约定），去掉日常寒暄和重复内容。用第三人称叙述，控制在300字以内。
-
----
-{conversation_text}
----
-
-摘要："""
-    
-    try:
-        headers = {
-            "Authorization": f"Bearer {API_KEY}",
-            "Content-Type": "application/json",
-        }
-        if "openrouter" in API_BASE_URL:
-            headers["HTTP-Referer"] = EXTRA_REFERER
-            headers["X-Title"] = EXTRA_TITLE
-        
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(API_BASE_URL, headers=headers, json={
-                "model": CACHE_SUMMARY_MODEL,
-                "max_tokens": 500,
-                "messages": [{"role": "user", "content": prompt}],
-            })
-            if response.status_code == 200:
-                data = response.json()
-                if "choices" in data:
-                    summary = data["choices"][0]["message"]["content"].strip()
-                    print(f"📝 摘要生成完成: {len(summary)}字 (压缩{len(messages)}条消息)")
-                    return summary
-        
-        print(f"⚠️ 摘要生成失败: HTTP {response.status_code}")
-        return ""
-    except Exception as e:
-        print(f"⚠️ 摘要生成异常: {e}")
-        return ""
-
-
-def group_by_rounds(history: list) -> list:
-    """
-    按逻辑轮分组：每个user消息开始一轮，到下一个user前结束。
-    一轮可能包含: [user, assistant] 或 [user, assistant(tool_calls), tool, assistant] 等。
-    """
-    rounds = []
-    current_round = []
-    for msg in history:
-        if msg['role'] == 'user' and current_round:
-            rounds.append(current_round)
-            current_round = []
-        current_round.append(msg)
-    if current_round:
-        rounds.append(current_round)
-    return rounds
-
-
-async def build_partitioned_messages(
-    session_id: str,
-    all_messages: list,
-    base_prompt: str,
-    user_message: str,
-) -> list:
-    """
-    分区缓存模式：构建带breakpoint的messages数组。
-    
-    结构：
-    system: [{人设, BP1}]                        ← 永远命中
-    messages:
-      [摘要blocks（每段一个block）, 最后BP]       ← 尾部追加，前面命中
-      [摘要assistant]
-      [A区消息... 最后一条BP2]                    ← 正常轮次不变
-      [B区消息... 最后一条BP3]                    ← lookback命中
-      [当前user: 时间+记忆+消息]                  ← 不缓存
-    """
-    X = CACHE_PARTITION_X
-    
-    non_system = [m for m in all_messages if m.get('role') != 'system']
-    
-    current_user_msg = None
-    history = non_system[:]
-    if history and history[-1].get('role') == 'user':
-        current_user_msg = history.pop()
-    
-    # 清洗孤立的tool消息（前面不是 assistant(tool_calls) 或另一条 tool 的）
-    # 防止DB里的重复tool消息导致消息乱序
-    cleaned = []
-    orphan_count = 0
-    for msg in history:
-        if msg.get('role') == 'tool':
-            prev = cleaned[-1] if cleaned else None
-            if prev and (prev.get('role') == 'tool' or 
-                        (prev.get('role') == 'assistant' and prev.get('tool_calls'))):
-                cleaned.append(msg)
-            else:
-                orphan_count += 1
-        else:
-            cleaned.append(msg)
-    if orphan_count > 0:
-        print(f"⚠️ 清理了 {orphan_count} 条孤立tool消息")
-    history = cleaned
-    
-    # 按逻辑轮分组（解决tool消息导致的轮计数错乱）
-    rounds = group_by_rounds(history)
-    total_rounds = len(rounds)
-    
-    state = await get_session_cache_state(session_id)
-    summary_parts = state['summary_parts']
-    a_start_round = state['a_start_round']
-    
-    if total_rounds < X:
-        return await _build_basic_cached(history, base_prompt, user_message, current_user_msg)
-    
-    # 计算A/B区（按逻辑轮切片）
-    a_end_round = a_start_round + X
-    a_round_groups = rounds[a_start_round : a_end_round]
-    b_round_groups = rounds[a_end_round :]
-    a_msgs = [msg for rnd in a_round_groups for msg in rnd]
-    b_msgs = [msg for rnd in b_round_groups for msg in rnd]
-    b_rounds_count = len(b_round_groups)
-    
-    rotation_count = 0
-    while b_rounds_count >= X:
-        rotation_count += 1
-        print(f"🔄 轮转#{rotation_count}: session={session_id}, B区{b_rounds_count}轮 >= X={X}")
-        
-        new_summary = await generate_summary(a_msgs, session_id)
-        if new_summary:
-            summary_parts.append(new_summary)
-        
-        a_start_round += X
-        a_end_round = a_start_round + X
-        a_round_groups = rounds[a_start_round : a_end_round]
-        b_round_groups = rounds[a_end_round :]
-        a_msgs = [msg for rnd in a_round_groups for msg in rnd]
-        b_msgs = [msg for rnd in b_round_groups for msg in rnd]
-        b_rounds_count = len(b_round_groups)
-    
-    if rotation_count > 0:
-        await save_session_cache_state(session_id, summary_parts, a_start_round)
-        summary_total = sum(len(p) for p in summary_parts)
-        print(f"🔄 轮转完成(共{rotation_count}次): 摘要{len(summary_parts)}段/{summary_total}字, A区{len(a_msgs)}条, B区{len(b_msgs)}条")
-    
-    # 拼装messages
-    result = [{
-        "role": "system",
-        "content": [{"type": "text", "text": base_prompt, "cache_control": {"type": "ephemeral"}}]
-    }]
-    
-    # 摘要区（多block，尾部追加模式）
-    if summary_parts:
-        blocks = [{"type": "text", "text": "[以下是之前对话的摘要，帮助你回忆上下文]"}]
-        for i, part in enumerate(summary_parts):
-            item = {"type": "text", "text": part}
-            if i == len(summary_parts) - 1:
-                item["cache_control"] = {"type": "ephemeral"}
-            blocks.append(item)
-        result.append({"role": "user", "content": blocks})
-        result.append({"role": "assistant", "content": "好的，我已了解之前的对话内容。"})
-    
-    for i, msg in enumerate(a_msgs):
-        m = {k: v for k, v in msg.items() if k not in ('created_at',)}
-        if i == len(a_msgs) - 1 and msg.get('role') != 'tool':
-            text = m.get('content') or ''
-            if isinstance(text, str) and text:
-                m['content'] = [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
-        result.append(m)
-    
-    for i, msg in enumerate(b_msgs):
-        m = {k: v for k, v in msg.items() if k not in ('created_at',)}
-        if i == len(b_msgs) - 1 and len(b_msgs) > 0 and msg.get('role') != 'tool':
-            text = m.get('content') or ''
-            if isinstance(text, str) and text:
-                m['content'] = [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
-        result.append(m)
-    
-    if current_user_msg:
-        parts = [build_time_injection()]
-        
-        if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
-            mem_text = await build_memory_text(user_message)
-            if mem_text:
-                parts.append(mem_text)
-        
-        current_text = current_user_msg['content']
-        if isinstance(current_text, list):
-            current_text = " ".join(
-                item.get("text", "") for item in current_text
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
-        parts.append(current_text)
-        result.append({"role": "user", "content": "\n\n".join(parts)})
-    
-    bp_count = 1 + (1 if summary_parts else 0) + (1 if a_msgs else 0) + (1 if b_msgs else 0)
-    summary_total = sum(len(p) for p in summary_parts)
-    print(f"🔒 分区缓存: BP×{bp_count} | 摘要{'有' if summary_parts else '无'}({len(summary_parts)}段/{summary_total}字) | A区{len(a_msgs)}条({len(a_round_groups)}轮) | B区{len(b_msgs)}条({b_rounds_count}轮) | 总{len(result)}条messages")
-    return result
-
-
-async def _build_basic_cached(
-    history: list,
-    base_prompt: str,
-    user_message: str,
-    current_user_msg: dict,
-) -> list:
-    """基础版prompt caching（历史不够分区时的降级模式）"""
-    result = [{
-        "role": "system",
-        "content": [{"type": "text", "text": base_prompt, "cache_control": {"type": "ephemeral"}}]
-    }]
-    
-    for i, msg in enumerate(history):
-        m = {k: v for k, v in msg.items() if k not in ('created_at',)}
-        if i == len(history) - 1 and len(history) > 0 and msg.get('role') != 'tool':
-            text = m.get('content') or ''
-            if isinstance(text, str) and text:
-                m['content'] = [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
-        result.append(m)
-    
-    if current_user_msg:
-        parts = [build_time_injection()]
-        
-        if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
-            mem_text = await build_memory_text(user_message)
-            if mem_text:
-                parts.append(mem_text)
-        
-        current_text = current_user_msg['content']
-        if isinstance(current_text, list):
-            current_text = " ".join(
-                item.get("text", "") for item in current_text
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
-        parts.append(current_text)
-        result.append({"role": "user", "content": "\n\n".join(parts)})
-    
-    bp_count = 1 + (1 if history else 0)
-    print(f"🔒 基础缓存(降级): BP×{bp_count} | 历史{len(history)}条 | 总{len(result)}条messages")
-    return result
-
-
-async def build_memory_text(user_message: str) -> str:
-    """搜索记忆并格式化为注入文本（分区缓存模式用）"""
-    try:
-        memories = await search_memories(user_message, limit=MAX_MEMORIES_INJECT)
-        if not memories:
-            return ""
-        
-        memory_lines = []
-        for mem in memories:
-            date_str = ""
-            if mem.get("created_at"):
-                try:
-                    utc_str = str(mem['created_at'])[:19]
-                    utc_dt = datetime.strptime(utc_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                    local_dt = utc_dt + timedelta(hours=TIMEZONE_HOURS)
-                    date_str = f"[{local_dt.strftime('%Y-%m-%d')}] "
-                except:
-                    date_str = f"[{str(mem['created_at'])[:10]}] "
-            memory_lines.append(f"- {date_str}{mem['content']}")
-        
-        print(f"📚 注入了 {len(memories)} 条相关记忆")
-        return "【从过往对话中检索到的相关记忆】\n" + "\n".join(memory_lines)
-    except Exception as e:
-        print(f"⚠️ 记忆检索失败: {e}")
-        return ""
-
-
-# ============================================================
 # 后台记忆处理
 # ============================================================
 
-async def process_memories_background(session_id: str, user_msg: str, assistant_msg: str, model: str, context_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, assistant_tool_calls: list = None):
+async def process_memories_background(session_id: str, user_msg: str, assistant_msg: str, model: str, context_messages: list = None):
     """
     后台异步：存储对话 + 提取记忆（不阻塞主流程）
     
@@ -520,63 +202,19 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
     - 0: 禁用自动提取
     - 1: 每轮提取（默认）
     - N: 每 N 轮提取一次
-    对话记录始终保存，不受间隔影响（除非 skip_conversation_log=True）。
+    对话记录始终保存，不受间隔影响。
     
     context_messages: 客户端发来的原始对话上下文（不含system prompt），
                       用于让提取模型从完整上下文中提取记忆。
-    skip_conversation_log: 跳过对话存储（标题生成等辅助请求时使用）
-    tool_messages: 客户端发来的工具结果消息列表
-    assistant_tool_calls: response中assistant的工具调用列表（如果有）
     """
     global _round_counter
     
     try:
-        # 1. 存储对话记录（除非明确跳过）
-        if skip_conversation_log:
-            print(f"⏭️  跳过对话存储（辅助请求）")
-        elif tool_messages:
-            # 工具结果轮次：存tool消息 + assistant回复（user消息在之前的轮次已存过）
-            for tm in tool_messages:
-                meta_dict = {}
-                if tm.get("tool_call_id"):
-                    meta_dict["tool_call_id"] = tm["tool_call_id"]
-                if tm.get("name"):
-                    meta_dict["name"] = tm["name"]
-                meta = json.dumps(meta_dict) if meta_dict else None
-                await save_message(session_id, "tool", tm.get("content", ""), model, metadata=meta)
-            
-            if assistant_msg or assistant_tool_calls:
-                ast_meta = json.dumps({"tool_calls": assistant_tool_calls}) if assistant_tool_calls else None
-                await save_message(session_id, "assistant", assistant_msg or "", model, metadata=ast_meta)
-                print(f"🔧 存储: {len(tool_messages)}条tool + 1条assistant" + (" (含tool_calls)" if assistant_tool_calls else ""))
-        else:
-            # 普通对话或首次工具调用
-            assistant_meta = json.dumps({"tool_calls": assistant_tool_calls}) if assistant_tool_calls else None
-            
-            if assistant_tool_calls:
-                # 首次工具调用：assistant回复包含tool_calls，存user + assistant(tool_calls)
-                await save_message(session_id, "user", user_msg, model)
-                await save_message(session_id, "assistant", assistant_msg or "", model, metadata=assistant_meta)
-                print(f"🔧 存储: user + assistant (含{len(assistant_tool_calls)}个tool_calls)")
-            else:
-                # 纯文字对话：re-roll检测 + 存user + assistant
-                last_user = await get_last_user_content(session_id)
-                if last_user and last_user.strip() == user_msg.strip():
-                    updated = await update_last_assistant_message(session_id, assistant_msg, model)
-                    if updated:
-                        print(f"🔄 检测到re-roll，已覆盖最后一条assistant回复")
-                    else:
-                        await save_message(session_id, "user", user_msg, model)
-                        await save_message(session_id, "assistant", assistant_msg, model)
-                else:
-                    await save_message(session_id, "user", user_msg, model)
-                    await save_message(session_id, "assistant", assistant_msg, model)
+        # 1. 存储对话记录（始终执行，只存最新一轮避免重复）
+        await save_message(session_id, "user", user_msg, model)
+        await save_message(session_id, "assistant", assistant_msg, model)
         
         # 2. 检查是否需要提取记忆
-        if not MEMORY_EXTRACT_ENABLED:
-            print(f"⏭️  记忆提取已关闭（MEMORY_EXTRACT_ENABLED=false）")
-            return
-        
         if MEMORY_EXTRACT_INTERVAL == 0:
             print(f"⏭️  记忆自动提取已禁用，跳过")
             return
@@ -698,24 +336,6 @@ async def chat_completions(request: Request):
     body = await request.json()
     messages = body.get("messages", [])
     
-    # ---------- 检测是否应跳过对话存储 ----------
-    # 方式1: 客户端通过header显式声明
-    skip_conversation_log = request.headers.get("X-Skip-Conversation-Log", "").lower() == "true"
-    
-    # 方式2: 自动检测标题生成等辅助请求
-    if not skip_conversation_log:
-        for msg in messages:
-            c = msg.get("content", "")
-            if isinstance(c, str):
-                cl = c.lower()
-                if ("title" in cl and "summarize" in cl) or ("标题" in cl and ("总结" in cl or "概括" in cl)):
-                    skip_conversation_log = True
-                    print("⏭️  检测到标题生成请求，跳过对话存储")
-                    break
-    
-    body = await request.json()
-    messages = body.get("messages", [])
-    
     # ---------- 提取用户最新消息 ----------
     user_message = ""
     for msg in reversed(messages):
@@ -734,83 +354,32 @@ async def chat_completions(request: Request):
     # 先保存原始对话消息（不含 system prompt），用于记忆提取
     original_messages = [msg for msg in messages if msg.get("role") != "system"]
     
-    # ---------- 检测工具调用消息 ----------
-    tool_messages = [m for m in messages if m.get("role") == "tool"]
-    if tool_messages:
-        print(f"🔧 检测到 {len(tool_messages)} 条工具结果消息")
-    
-    # ---------- 生成 session ID ----------
-    session_id = str(uuid.uuid4())[:8]
-    
-    # ---------- 分区缓存模式 ----------
-    if CACHE_PARTITION_ENABLED and SYSTEM_PROMPT:
-        active_sid = get_active_session_id()
-        if active_sid:
-            session_id = active_sid
+    if SYSTEM_PROMPT or (MEMORY_ENABLED and user_message):
+        if MEMORY_ENABLED and user_message:
+            enhanced_prompt = await build_system_prompt_with_memories(user_message)
+        else:
+            enhanced_prompt = SYSTEM_PROMPT
         
-        # 从DB读取历史
-        try:
-            db_history = await get_conversation_messages(session_id, limit=10000)
-            db_msgs = [db_row_to_message(m) for m in db_history] if db_history else []
-        except Exception as e:
-            print(f"[warning] 分区模式读取历史失败: {e}")
-            db_msgs = []
-        
-        # 提取客户端新消息（非system），可能是user、tool、或带tool_calls的assistant
-        client_new_msgs = [m for m in messages if m.get("role") != "system"]
-        # 分区模式下，assistant消息来自上一轮response（DB里已存），过滤掉避免重复
-        client_new_msgs = [m for m in client_new_msgs if m.get("role") != "assistant"]
-        # 工具结果轮次处理
-        if any(m.get("role") == "tool" for m in client_new_msgs):
-            # 检查DB历史是否已包含tool消息（上一轮已存储过）
-            db_has_recent_tool = any(m.get("role") == "tool" for m in db_msgs[-20:]) if db_msgs else False
-            if db_has_recent_tool:
-                # tool已在DB中，客户端发的是重复的，只保留新user
-                new_users = [m for m in client_new_msgs if m.get("role") == "user"]
-                client_new_msgs = [new_users[-1]] if new_users else []
+        if enhanced_prompt:
+            has_system = any(msg.get("role") == "system" for msg in messages)
+            if has_system:
+                for i, msg in enumerate(messages):
+                    if msg.get("role") == "system":
+                        messages[i]["content"] = enhanced_prompt + "\n\n" + msg["content"]
+                        break
             else:
-                # tool还没存DB，保留tool + 最后的user（如果有）
-                last_msg = client_new_msgs[-1] if client_new_msgs else None
-                client_new_msgs = [m for m in client_new_msgs if m.get("role") == "tool"]
-                if last_msg and last_msg.get("role") == "user":
-                    client_new_msgs.append(last_msg)
-        all_msgs = db_msgs + client_new_msgs
-        
-        # 同步更新tool_messages，避免process_memories_background存重复的旧tool
-        tool_messages = [m for m in client_new_msgs if m.get("role") == "tool"]
-        
-        print(f"📦 分区模式: DB历史{len(db_msgs)}条 + 客户端消息{len(client_new_msgs)}条")
-        
-        messages = await build_partitioned_messages(
-            session_id, all_msgs, SYSTEM_PROMPT, user_message
-        )
-        body["messages"] = messages
+                messages.insert(0, {"role": "system", "content": enhanced_prompt})
     
-    else:
-        # ---------- 原有逻辑：system prompt + 记忆注入 ----------
-        if SYSTEM_PROMPT or (MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message):
-            if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
-                enhanced_prompt = await build_system_prompt_with_memories(user_message)
-            else:
-                enhanced_prompt = SYSTEM_PROMPT
-            
-            if enhanced_prompt:
-                has_system = any(msg.get("role") == "system" for msg in messages)
-                if has_system:
-                    for i, msg in enumerate(messages):
-                        if msg.get("role") == "system":
-                            messages[i]["content"] = enhanced_prompt + "\n\n" + msg["content"]
-                            break
-                else:
-                    messages.insert(0, {"role": "system", "content": enhanced_prompt})
-        
-        body["messages"] = messages
+    body["messages"] = messages
     
     # ---------- 模型处理 ----------
     model = body.get("model", DEFAULT_MODEL)
     if not model:
         model = DEFAULT_MODEL
     body["model"] = model
+    
+    # ---------- 生成 session ID ----------
+    session_id = str(uuid.uuid4())[:8]
     
     # ---------- 转发请求 ----------
     headers = {
@@ -848,7 +417,7 @@ async def chat_completions(request: Request):
     
     if is_stream:
         return StreamingResponse(
-            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages),
+            stream_and_capture(headers, body, session_id, user_message, model, original_messages),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
@@ -859,21 +428,14 @@ async def chat_completions(request: Request):
             if response.status_code == 200:
                 resp_data = response.json()
                 assistant_msg = ""
-                assistant_tool_calls = None
                 try:
-                    msg_obj = resp_data["choices"][0]["message"]
-                    assistant_msg = msg_obj.get("content") or ""
-                    if msg_obj.get("tool_calls"):
-                        assistant_tool_calls = msg_obj["tool_calls"]
-                        print(f"🔧 Response 包含 {len(assistant_tool_calls)} 个工具调用")
+                    assistant_msg = resp_data["choices"][0]["message"]["content"]
                 except (KeyError, IndexError):
                     pass
                 
-                if MEMORY_ENABLED and (user_message or tool_messages):
+                if MEMORY_ENABLED and user_message and assistant_msg:
                     asyncio.create_task(
-                        process_memories_background(session_id, user_message, assistant_msg, model, 
-                                                    context_messages=original_messages, skip_conversation_log=skip_conversation_log,
-                                                    tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls)
+                        process_memories_background(session_id, user_message, assistant_msg, model, context_messages=original_messages)
                     )
                 
                 return JSONResponse(status_code=200, content=resp_data)
@@ -881,12 +443,10 @@ async def chat_completions(request: Request):
                 return JSONResponse(status_code=response.status_code, content=response.json())
 
 
-async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None):
+async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None):
     """流式响应 + 捕获完整回复（原始字节透传，确保SSE格式和thinking数据完整）"""
     full_response = []
-    stream_usage = {}
     line_buffer = ""
-    accumulated_tool_calls = {}  # index -> {id, type, function: {name, arguments}}
     
     async with httpx.AsyncClient(timeout=300) as client:
         async with client.stream("POST", API_BASE_URL, headers=headers, json=body) as response:
@@ -907,56 +467,17 @@ async def stream_and_capture(headers: dict, body: dict, session_id: str, user_me
                     if line.startswith("data: ") and line != "data: [DONE]":
                         try:
                             data = json.loads(line[6:])
-                            
-                            if "usage" in data:
-                                stream_usage = data["usage"]
-                            
                             delta = data.get("choices", [{}])[0].get("delta", {})
                             content = delta.get("content", "")
                             if content:
                                 full_response.append(content)
-                            
-                            # 累积tool_calls
-                            if "tool_calls" in delta:
-                                for tc in delta["tool_calls"]:
-                                    idx = tc.get("index", 0)
-                                    if idx not in accumulated_tool_calls:
-                                        accumulated_tool_calls[idx] = {
-                                            "index": idx,
-                                            "id": tc.get("id", ""),
-                                            "type": tc.get("type", "function"),
-                                            "function": {"name": "", "arguments": ""}
-                                        }
-                                    if tc.get("id"):
-                                        accumulated_tool_calls[idx]["id"] = tc["id"]
-                                    if "function" in tc:
-                                        fn = tc["function"]
-                                        if fn.get("name"):
-                                            accumulated_tool_calls[idx]["function"]["name"] = fn["name"]
-                                        if "arguments" in fn:
-                                            accumulated_tool_calls[idx]["function"]["arguments"] += fn["arguments"]
                         except (json.JSONDecodeError, KeyError, IndexError):
                             pass
     
     assistant_msg = "".join(full_response)
-    assistant_tool_calls = list(accumulated_tool_calls.values()) if accumulated_tool_calls else None
-    
-    if assistant_tool_calls:
-        print(f"🔧 Stream response 包含 {len(assistant_tool_calls)} 个工具调用")
-    
-    if stream_usage:
-        pt = stream_usage.get("prompt_tokens", 0)
-        ct = stream_usage.get("completion_tokens", 0)
-        tt = stream_usage.get("total_tokens", 0)
-        if tt > 0:
-            asyncio.create_task(save_token_usage(session_id, model, pt, ct, tt))
-            print(f"📊 Stream Token: {pt} + {ct} = {tt}")
-    
-    if MEMORY_ENABLED and (user_message or tool_messages):
+    if MEMORY_ENABLED and user_message and assistant_msg:
         asyncio.create_task(
-            process_memories_background(session_id, user_message, assistant_msg, model, 
-                                        context_messages=original_messages, skip_conversation_log=skip_conversation_log,
-                                        tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls)
+            process_memories_background(session_id, user_message, assistant_msg, model, context_messages=original_messages)
         )
 
 
@@ -1031,31 +552,6 @@ async def api_get_memories():
                 dt = dt.replace(tzinfo=timezone.utc)
             m["created_at"] = dt.astimezone(tz_offset).strftime("%Y-%m-%d %H:%M:%S")
     return {"memories": memories}
-
-
-@app.get("/api/memories/search")
-async def api_search_memories(q: str = "", limit: int = 20):
-    """语义搜索记忆（Dashboard用，走后端 search_memories）"""
-    if not MEMORY_ENABLED:
-        return {"error": "记忆系统未启用"}
-    if not q.strip():
-        return {"error": "搜索关键词不能为空", "results": []}
-    try:
-        results = await search_memories(q.strip(), limit)
-        tz_offset = timezone(timedelta(hours=TIMEZONE_HOURS))
-        out = []
-        for r in results:
-            item = dict(r)
-            if item.get("created_at"):
-                dt = item["created_at"]
-                if hasattr(dt, 'tzinfo'):
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    item["created_at"] = dt.astimezone(tz_offset).strftime("%Y-%m-%d %H:%M:%S")
-            out.append(item)
-        return {"results": out, "total": len(out)}
-    except Exception as e:
-        return {"error": str(e), "results": []}
 
 
 @app.put("/api/memories/{memory_id}")
@@ -1217,316 +713,6 @@ async def import_memories(request: Request):
 
 
 # ============================================================
-# 对话记录管理 API
-# ============================================================
-
-@app.get("/api/conversations")
-async def api_conversations(page: int = 1, per_page: int = 20):
-    if not MEMORY_ENABLED:
-        return {"error": "记忆系统未启用"}
-    try:
-        results, total = await get_conversations_paginated(page, per_page)
-        total_pages = max(1, -(-total // per_page))  # 向上取整
-        return {"conversations": results, "total": total, "page": page, "per_page": per_page, "total_pages": total_pages}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.get("/api/conversations/{session_id}/messages")
-async def api_conversation_messages(session_id: str, limit: int = 50, offset: int = 0):
-    if not MEMORY_ENABLED:
-        return {"error": "记忆系统未启用"}
-    try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            total = await conn.fetchval(
-                "SELECT COUNT(*) FROM conversations WHERE session_id = $1", session_id
-            )
-            rows = await conn.fetch("""
-                SELECT id, role, content, created_at
-                FROM conversations WHERE session_id = $1
-                ORDER BY created_at DESC
-                LIMIT $2 OFFSET $3
-            """, session_id, limit, offset)
-        msgs = [{"id": r["id"], "role": r["role"], "content": r["content"], 
-                 "created_at": r["created_at"].isoformat() if r.get("created_at") else None} for r in rows]
-        return {"messages": msgs, "total": total}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.delete("/api/conversations/{session_id}")
-async def api_delete_conversation(session_id: str):
-    if not MEMORY_ENABLED:
-        return {"error": "记忆系统未启用"}
-    try:
-        await delete_conversation(session_id)
-        return {"status": "ok"}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.post("/api/conversations/batch-delete")
-async def api_batch_delete(request: Request):
-    if not MEMORY_ENABLED:
-        return {"error": "记忆系统未启用"}
-    try:
-        body = await request.json()
-        ids = body.get("session_ids", [])
-        if ids:
-            await batch_delete_conversations(ids)
-        return {"status": "ok", "deleted": len(ids)}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.post("/api/admin/merge-sessions")
-async def api_merge_sessions(request: Request):
-    if not MEMORY_ENABLED:
-        return {"error": "记忆系统未启用"}
-    try:
-        body = await request.json()
-        source_ids = [s for s in body.get("source_ids", []) if s != body.get("target_id", "")]
-        target_id = body.get("target_id", "")
-        if not source_ids or not target_id:
-            return {"error": "source_ids 和 target_id 不能为空"}
-        result = await merge_sessions_to_target(source_ids, target_id)
-        return {"status": "ok", **result}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.get("/api/chat/search")
-async def api_search_conversations(q: str = "", limit: int = 20, offset: int = 0):
-    """搜索对话内容"""
-    if not MEMORY_ENABLED:
-        return {"error": "记忆系统未启用"}
-    if not q.strip():
-        return {"error": "搜索关键词不能为空", "results": [], "total": 0}
-    try:
-        results, total = await search_conversations(q.strip(), limit, offset)
-        return {"results": results, "total": total}
-    except Exception as e:
-        return {"error": str(e), "results": [], "total": 0}
-
-
-@app.patch("/api/chat/messages/{message_id}")
-async def api_update_message(message_id: int, request: Request):
-    """编辑单条消息内容"""
-    if not MEMORY_ENABLED:
-        return {"error": "记忆系统未启用"}
-    try:
-        body = await request.json()
-        content = body.get("content", "").strip()
-        if not content:
-            return {"error": "内容不能为空"}
-        updated = await update_message_content(message_id, content)
-        if updated == 0:
-            return {"error": "消息不存在"}
-        return {"status": "ok"}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.get("/api/conversations/export")
-async def api_export_conversations():
-    """导出所有对话记录"""
-    if not MEMORY_ENABLED:
-        return {"error": "记忆系统未启用"}
-    try:
-        data = await export_all_conversations()
-        return JSONResponse(content=data)
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.post("/api/conversations/import")
-async def api_import_conversations(request: Request):
-    """导入对话记录（JSON格式，自动去重）"""
-    if not MEMORY_ENABLED:
-        return {"error": "记忆系统未启用"}
-    try:
-        records = await request.json()
-        if not isinstance(records, list):
-            return {"error": "格式错误：需要 JSON 数组"}
-        imported, skipped = await import_conversations(records)
-        return {"status": "ok", "imported": imported, "skipped": skipped, "total": imported + skipped}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-# ============================================================
-# 对话线管理 API（分区缓存）
-# ============================================================
-
-@app.get("/api/partition/status")
-async def api_partition_status():
-    active_sid = get_active_session_id()
-    state = await get_session_cache_state(active_sid) if active_sid else {}
-    return {
-        "enabled": CACHE_PARTITION_ENABLED,
-        "active_session_id": active_sid,
-        "partition_x": CACHE_PARTITION_X,
-        "summary_model": CACHE_SUMMARY_MODEL,
-        "summary": '\n\n'.join(state.get('summary_parts', [])),
-        "summary_parts": state.get('summary_parts', []),
-        "summary_count": len(state.get('summary_parts', [])),
-        "summary_length": sum(len(p) for p in state.get('summary_parts', [])),
-        "a_start_round": state.get('a_start_round', 0),
-        "updated_at": state.get('updated_at').isoformat() if state.get('updated_at') else None,
-    }
-
-
-@app.get("/api/partition/threads")
-async def api_partition_threads():
-    threads = await list_all_session_cache_states()
-    active_sid = get_active_session_id()
-    for t in threads:
-        t['is_active'] = (t['session_id'] == active_sid)
-    if active_sid and not any(t['session_id'] == active_sid for t in threads):
-        threads.insert(0, {'session_id': active_sid, 'summary': '', 'summary_length': 0, 'summary_count': 0, 'a_start_round': 0, 'updated_at': None, 'message_count': 0, 'chat_tokens': 0, 'is_active': True})
-    return {"threads": threads, "active_session_id": active_sid}
-
-
-@app.put("/api/partition/summary")
-async def api_update_summary(request: Request):
-    try:
-        body = await request.json()
-        sid = body.get("session_id", "")
-        summary = body.get("summary", "")
-        if not sid:
-            return {"error": "session_id 不能为空"}
-        state = await get_session_cache_state(sid)
-        summary_parts = [summary] if isinstance(summary, str) and summary else summary if isinstance(summary, list) else []
-        await save_session_cache_state(sid, summary_parts, state.get('a_start_round', 0))
-        total_len = sum(len(p) for p in summary_parts)
-        return {"status": "ok", "summary_parts": len(summary_parts), "summary_length": total_len}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.delete("/api/partition/summary")
-async def api_clear_summary(request: Request):
-    try:
-        body = await request.json()
-        sid = body.get("session_id", "")
-        if not sid:
-            return {"error": "session_id 不能为空"}
-        state = await get_session_cache_state(sid)
-        await save_session_cache_state(sid, [], state.get('a_start_round', 0))
-        return {"status": "ok"}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.post("/api/partition/thread")
-async def api_create_thread(request: Request):
-    try:
-        body = await request.json()
-        new_id = body.get("session_id", "").strip()
-        copy_from = body.get("copy_summary_from", "")
-        if not new_id:
-            return {"error": "session_id 不能为空"}
-        existing = await get_session_cache_state(new_id)
-        if existing.get('updated_at'):
-            return {"error": f"对话线 '{new_id}' 已存在"}
-        summary_parts = []
-        if copy_from:
-            source = await get_session_cache_state(copy_from)
-            summary_parts = source.get('summary_parts', [])
-        await save_session_cache_state(new_id, summary_parts, 0)
-        total_len = sum(len(p) for p in summary_parts)
-        return {"status": "ok", "session_id": new_id, "summary_length": total_len}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.post("/api/partition/switch")
-async def api_switch_thread(request: Request):
-    global PARTITION_SESSION_ID
-    try:
-        body = await request.json()
-        new_id = body.get("session_id", "").strip()
-        if not new_id:
-            return {"error": "session_id 不能为空"}
-        old_id = PARTITION_SESSION_ID
-        PARTITION_SESSION_ID = new_id
-        await set_gateway_config("partition_session_id", new_id)
-        return {"status": "ok", "old_session_id": old_id, "new_session_id": new_id}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-# ============================================================
-# 记忆向量补算（带进度追踪）
-# ============================================================
-
-_backfill_mem_status = {
-    "running": False,
-    "total": 0,
-    "done": 0,
-    "error": None,
-    "finished_at": None,
-}
-
-@app.post("/api/admin/backfill-memory-embeddings")
-async def api_backfill_memory_embeddings():
-    """给已有记忆补算embedding（后台异步执行，前端轮询进度）"""
-    if not MEMORY_ENABLED:
-        return {"error": "记忆系统未启用"}
-    
-    if _backfill_mem_status["running"]:
-        return {"error": "补算任务正在运行中，请等待完成"}
-    
-    try:
-        total = await get_pending_memory_embedding_count()
-    except Exception as e:
-        return {"error": f"查询待处理数量失败: {e}"}
-    
-    if total == 0:
-        return {"status": "done", "message": "所有记忆已有embedding，无需补算", "total": 0, "done": 0}
-    
-    _backfill_mem_status["running"] = True
-    _backfill_mem_status["total"] = total
-    _backfill_mem_status["done"] = 0
-    _backfill_mem_status["error"] = None
-    _backfill_mem_status["finished_at"] = None
-    
-    async def run_backfill():
-        try:
-            while _backfill_mem_status["running"]:
-                updated = await backfill_memory_embeddings(batch_size=20)
-                _backfill_mem_status["done"] += updated
-                
-                if updated == 0:
-                    break
-                
-                await asyncio.sleep(1)
-            
-            _backfill_mem_status["finished_at"] = datetime.now(timezone.utc).isoformat()
-            print(f"✅ 记忆embedding补算完成：{_backfill_mem_status['done']}/{_backfill_mem_status['total']}")
-        except Exception as e:
-            _backfill_mem_status["error"] = str(e)
-            print(f"❌ 记忆embedding补算异常: {e}")
-        finally:
-            _backfill_mem_status["running"] = False
-    
-    asyncio.create_task(run_backfill())
-    return {"status": "started", "total": total}
-
-@app.get("/api/admin/backfill-memory-embeddings/status")
-async def api_backfill_memory_embeddings_status():
-    """查询记忆embedding补算进度"""
-    return {
-        "running": _backfill_mem_status["running"],
-        "total": _backfill_mem_status["total"],
-        "done": _backfill_mem_status["done"],
-        "error": _backfill_mem_status["error"],
-        "finished_at": _backfill_mem_status["finished_at"],
-    }
-
-
-# ============================================================
 
 if __name__ == "__main__":
     import uvicorn
@@ -1535,11 +721,7 @@ if __name__ == "__main__":
     print(f"🤖 默认模型：{DEFAULT_MODEL}")
     print(f"🔗 API 地址：{API_BASE_URL}")
     print(f"🧠 记忆系统：{'开启' if MEMORY_ENABLED else '关闭'}")
-    if MEMORY_ENABLED:
-        print(f"📝 记忆提取+注入：{'开启' if MEMORY_EXTRACT_ENABLED else '关闭'}")
     print(f"🔄 记忆提取间隔：{'禁用' if MEMORY_EXTRACT_INTERVAL == 0 else '每轮提取' if MEMORY_EXTRACT_INTERVAL == 1 else f'每 {MEMORY_EXTRACT_INTERVAL} 轮提取一次'}")
-    if CACHE_PARTITION_ENABLED:
-        print(f"🔒 分区缓存：开启 (X={CACHE_PARTITION_X}, session={PARTITION_SESSION_ID or '未设置'})")
     if FORCE_STREAM:
         print(f"⚡ 强制流式传输：开启")
     if REASONING_EFFORT:
