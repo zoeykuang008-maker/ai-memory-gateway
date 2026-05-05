@@ -5,6 +5,35 @@
  */
 
 // ============================================
+// 内联 SVG 图标（Lucide 风格，24x24 viewBox）
+// ============================================
+const ICONS = (() => {
+    const s = (inner, size = 16) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+    return {
+        brain:      (sz) => s('<path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/>', sz),
+        download:   (sz) => s('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>', sz),
+        upload:     (sz) => s('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/>', sz),
+        msgSquare:  (sz) => s('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>', sz),
+        link:       (sz) => s('<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>', sz),
+        github:     (sz) => s('<path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/>', sz),
+        search:     (sz) => s('<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>', sz),
+        sparkles:   (sz) => s('<path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/>', sz),
+        x:          (sz) => s('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>', sz),
+        star:       (sz) => s('<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>', sz),
+        calendar:   (sz) => s('<rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/>', sz),
+        fileText:   (sz) => s('<path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><line x1="10" x2="8" y1="9" y2="9"/>', sz),
+        check:      (sz) => s('<polyline points="20 6 9 17 4 12"/>', sz),
+        trash:      (sz) => s('<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>', sz),
+        rotateCcw:  (sz) => s('<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>', sz),
+        undo:       (sz) => s('<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5v0a5.5 5.5 0 0 1-5.5 5.5H11"/>', sz),
+        paperclip:  (sz) => s('<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>', sz),
+        gitMerge:   (sz) => s('<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>', sz),
+        calculator: (sz) => s('<rect width="16" height="20" x="4" y="2" rx="2"/><line x1="8" x2="16" y1="6" y2="6"/><line x1="16" x2="16" y1="14" y2="18"/><path d="M16 10h.01"/><path d="M12 10h.01"/><path d="M8 10h.01"/><path d="M12 14h.01"/><path d="M8 14h.01"/><path d="M12 18h.01"/><path d="M8 18h.01"/>', sz),
+        save:       (sz) => s('<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>', sz),
+    };
+})();
+
+// ============================================
 // 网关鉴权：从URL参数读取gateway_key，自动注入所有请求
 // ============================================
 const _gatewayKey = new URLSearchParams(window.location.search).get('gateway_key') || '';
@@ -31,9 +60,9 @@ let memCurrentPage = 1;
 const MEM_PER_PAGE = 50;
 
 const LAYER_NAMES = {
-    1: '📝 碎片',
-    2: '📅 事件',
-    3: '⭐ 核心'
+    1: '碎片',
+    2: '事件',
+    3: '核心'
 };
 
 // ============================================
@@ -161,16 +190,16 @@ function renderTable(mems, startIndex) {
         
         // 层级下拉选择器
         const layerSelect = '<select class="layer-select" id="l_' + m.id + '" onchange="changeLayer(' + m.id + ')">' +
-            '<option value="1"' + (layer === 1 ? ' selected' : '') + '>📝 碎片</option>' +
-            '<option value="2"' + (layer === 2 ? ' selected' : '') + '>📅 事件</option>' +
-            '<option value="3"' + (layer === 3 ? ' selected' : '') + '>⭐ 核心</option>' +
+            '<option value="1"' + (layer === 1 ? ' selected' : '') + '>碎片</option>' +
+            '<option value="2"' + (layer === 2 ? ' selected' : '') + '>事件</option>' +
+            '<option value="3"' + (layer === 3 ? ' selected' : '') + '>核心</option>' +
             '</select>';
         
         // 合并来源提示
         let mergeInfo = '';
         if (mergedFrom.length > 0) {
             mergeInfo = '<div class="merge-info" onclick="showMergeSource(' + m.id + ')">' +
-                '📎 由 ' + mergedFrom.length + ' 条合并</div>';
+                ICONS.paperclip(12) + ' 由 ' + mergedFrom.length + ' 条合并</div>';
         }
         
         // 撤回按钮（只有事件记忆且有合并来源时显示）
@@ -1099,8 +1128,8 @@ function renderConvList(conversations, isSearch = false) {
         <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 13px;">
             <input type="checkbox" id="conv-select-all" onchange="toggleConvSelectAll(this.checked)"> 全选
         </label>
-        <button class="btn btn-sm" onclick="batchDeleteConversations()" id="conv-batch-delete-btn" style="display: none; font-size: 12px;">🗑️ 批量删除</button>
-        <button class="btn btn-sm" onclick="batchMergeSessions()" id="conv-batch-merge-btn" style="display: none; font-size: 12px;">🔗 合并到...</button>
+        <button class="btn btn-sm" onclick="batchDeleteConversations()" id="conv-batch-delete-btn" style="display: none; font-size: 12px;">${ICONS.trash(13)} 批量删除</button>
+        <button class="btn btn-sm" onclick="batchMergeSessions()" id="conv-batch-merge-btn" style="display: none; font-size: 12px;">${ICONS.gitMerge(13)} 合并到...</button>
         <span id="conv-selected-count" style="color: var(--text-muted); font-size: 12px; display: none;"></span>
     </div>`;
     
@@ -1130,7 +1159,7 @@ function renderConvList(conversations, isSearch = false) {
                     <div style="text-align: right; flex-shrink: 0; margin-left: 12px;">
                         <div style="color: var(--text-muted); font-size: 12px;">${timeStr}</div>
                         ${msgCount ? `<div style="color: var(--text-muted); font-size: 12px; margin-top: 2px;">${msgCount} 条</div>` : ''}
-                        ${tokenStr ? `<div style="color: var(--text-muted); font-size: 11px; margin-top: 2px;">🪙 ${tokenStr}</div>` : ''}
+                        ${tokenStr ? `<div style="color: var(--text-muted); font-size: 11px; margin-top: 2px;">${tokenStr}</div>` : ''}
                     </div>
                 </div>
             </div>
@@ -1210,7 +1239,7 @@ async function loadConvMessages(sessionId, append = false) {
         let html = '';
         if (!append) {
             html += `<div style="margin-bottom: 12px; display: flex; gap: 8px; justify-content: flex-end;">
-                <button class="btn btn-sm" onclick="deleteConversation('${escapeHtml(sessionId)}')">🗑️ 删除对话</button>
+                <button class="btn btn-sm" onclick="deleteConversation('${escapeHtml(sessionId)}')">${ICONS.trash(13)} 删除对话</button>
             </div>`;
         }
         
@@ -1515,17 +1544,17 @@ function renderThreadList(threads) {
                     ${isActive ? '<span style="background: var(--primary); color: white; font-size: 11px; padding: 2px 8px; border-radius: 10px;">活跃</span>' : ''}
                 </div>
                 <div style="display: flex; gap: 6px;">
-                    <button class="btn btn-sm" onclick="renameThread('${t.session_id}')">✏️ 改名</button>
-                    <button class="btn btn-sm" onclick="openSummaryModal('${t.session_id}')">📝 摘要</button>
+                    <button class="btn btn-sm" onclick="renameThread('${t.session_id}')">改名</button>
+                    <button class="btn btn-sm" onclick="openSummaryModal('${t.session_id}')">摘要</button>
                     ${!isActive ? `<button class="btn btn-sm btn-primary" onclick="switchThread('${t.session_id}')">切换到此</button>` : ''}
                 </div>
             </div>
             <div style="color: var(--text-muted); font-size: 13px; line-height: 1.5;">
                 <div>${summaryPreview}</div>
                 <div style="margin-top: 6px; display: flex; gap: 16px;">
-                    <span>💬 ${t.message_count} 条消息</span>
-                    <span>🪙 ${tokens}</span>
-                    <span>📝 摘要 ${t.summary_length} 字</span>
+                    <span>${t.message_count} 条消息</span>
+                    <span>${tokens}</span>
+                    <span>摘要 ${t.summary_length} 字</span>
                     ${updatedStr ? `<span>更新于 ${updatedStr}</span>` : ''}
                 </div>
             </div>
