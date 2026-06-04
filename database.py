@@ -1157,17 +1157,6 @@ async def save_token_usage(session_id: str, model: str, prompt_tokens: int, comp
 # 对话记录管理
 # ============================================================
 
-async def ensure_conversation_titles_table():
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS conversation_titles (
-                session_id  TEXT PRIMARY KEY,
-                title       TEXT DEFAULT ''
-            );
-        """)
-
-
 async def get_conversations_paginated(page: int = 1, per_page: int = 20):
     offset = (page - 1) * per_page
     pool = await get_pool()
@@ -1176,16 +1165,15 @@ async def get_conversations_paginated(page: int = 1, per_page: int = 20):
             "SELECT COUNT(DISTINCT session_id) as total FROM conversations"
         )
         total = total_row['total'] if total_row else 0
-        
+
         rows = await conn.fetch("""
             WITH session_info AS (
                 SELECT session_id, MIN(created_at) as first_time, MAX(created_at) as last_time, COUNT(*) as message_count
                 FROM conversations GROUP BY session_id ORDER BY last_time DESC LIMIT $1 OFFSET $2
             )
-            SELECT si.*, ct.title as custom_title,
+            SELECT si.*,
                    COALESCE(tu.total_all, 0) as total_tokens
             FROM session_info si
-            LEFT JOIN conversation_titles ct ON si.session_id = ct.session_id
             LEFT JOIN (
                 SELECT session_id, SUM(total_tokens) as total_all FROM token_usage WHERE usage_type = 'chat' GROUP BY session_id
             ) tu ON si.session_id = tu.session_id
@@ -1199,7 +1187,7 @@ async def get_conversations_paginated(page: int = 1, per_page: int = 20):
                 r['session_id']
             )
             preview = preview_row['content'][:80] if preview_row else ''
-            title = r['custom_title'] or (preview[:30] + '...' if len(preview) > 30 else preview) or r['session_id']
+            title = (preview[:30] + '...' if len(preview) > 30 else preview) or r['session_id']
             results.append({
                 'session_id': r['session_id'],
                 'title': title,
@@ -1216,7 +1204,6 @@ async def delete_conversation(session_id: str):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM conversations WHERE session_id = $1", session_id)
-        await conn.execute("DELETE FROM conversation_titles WHERE session_id = $1", session_id)
         await conn.execute("DELETE FROM session_cache_state WHERE session_id = $1", session_id)
 
 
@@ -1224,7 +1211,6 @@ async def batch_delete_conversations(session_ids: list):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM conversations WHERE session_id = ANY($1)", session_ids)
-        await conn.execute("DELETE FROM conversation_titles WHERE session_id = ANY($1)", session_ids)
         await conn.execute("DELETE FROM session_cache_state WHERE session_id = ANY($1)", session_ids)
 
 
@@ -1237,7 +1223,6 @@ async def merge_sessions_to_target(source_ids: list, target_id: str) -> dict:
         await conn.execute("UPDATE conversations SET session_id = $1 WHERE session_id = ANY($2)", target_id, source_ids)
         token_count = await conn.fetchval("SELECT COUNT(*) FROM token_usage WHERE session_id = ANY($1)", source_ids)
         await conn.execute("UPDATE token_usage SET session_id = $1 WHERE session_id = ANY($2)", target_id, source_ids)
-        await conn.execute("DELETE FROM conversation_titles WHERE session_id = ANY($1)", source_ids)
         await conn.execute("DELETE FROM session_cache_state WHERE session_id = ANY($1)", source_ids)
         return {'merged_sessions': len(source_ids), 'merged_messages': msg_count or 0, 'merged_token_records': token_count or 0}
 
