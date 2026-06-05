@@ -1882,7 +1882,7 @@ let _modelList = [];
 
 // 所有需要读写的字段 key（开源版：EMBEDDING_API_KEY + EMBEDDING_BASE_URL）
 const _SETTINGS_FIELDS = {
-    str: ['API_BASE_URL', 'API_KEY', 'DEFAULT_MODEL', 'MEMORY_MODEL',
+    str: ['API_BASE_URL', 'API_KEY', 'DEFAULT_MODEL', 'MEMORY_API_KEY', 'MEMORY_MODEL',
           'CACHE_SUMMARY_MODEL', 'CACHE_PARTITION_TRIGGER', 'EMBEDDING_API_KEY', 'EMBEDDING_BASE_URL', 'EMBEDDING_MODEL', 'REASONING_EFFORT'],
     int: ['MAX_MEMORIES_INJECT', 'MEMORY_EXTRACT_INTERVAL', 'CACHE_PARTITION_X', 'CACHE_PARTITION_WINDOW', 'EMBEDDING_DIM'],
     float: ['MIN_SCORE_THRESHOLD'],
@@ -1913,7 +1913,7 @@ async function loadSettings() {
             if (el) el.value = s[k] || '';
         });
         // 打码字段提示
-        ['API_KEY', 'EMBEDDING_API_KEY'].forEach(k => {
+        ['API_KEY', 'MEMORY_API_KEY', 'EMBEDDING_API_KEY'].forEach(k => {
             const hint = document.getElementById('set-' + k + '-hint');
             if (hint && s[k]) hint.textContent = '当前: ' + s[k];
         });
