@@ -366,10 +366,11 @@ def extract_search_keywords(query: str) -> List[str]:
             continue
         keywords.add(tag)
 
-    # 补救：jieba.analyse.extract_tags 内部有 len<2 过滤，会丢弃所有“单字词”，
-    # 导致 "猫"/"狗"/"书" 这类查询提取不到关键词、检索为空（即使记忆里写着“布偶猫”）。
-    # 这里用全切分把“不在停用词表里的单字中文词”补回关键词集合。
-    for tok in jieba.lcut(cleaned):
+    # 补救：jieba.analyse.extract_tags 内部有 len<2 过滤，会丢弃所有“单字词”；
+    # 而精确分词又可能把“猫叫”这类粘成一个词，使得 "猫" 既进不了 TF-IDF、
+    # 也不是独立 token。改用全模式(cut_all)枚举所有词典单字，把不在停用词表里的
+    # 单字中文词补回关键词集合，保证 "我家猫叫什么" 也能命中“布偶猫”。
+    for tok in jieba.cut(cleaned, cut_all=True):
         if len(tok) == 1 and CJK_CHAR_PATTERN.match(tok) and tok not in _STOP_WORDS:
             keywords.add(tok)
 
