@@ -296,6 +296,8 @@ jieba.setLogLevel(jieba.logging.INFO)
 
 EN_WORD_PATTERN = re.compile(r'[a-zA-Z][a-zA-Z0-9]*')
 NUM_PATTERN = re.compile(r'\d{2,}')
+# 单个中文字符（CJK 统一表意文字）
+CJK_CHAR_PATTERN = re.compile(r'[一-鿿]')
 # 清理查询开头的时间戳（如 "2026-05-02 20:26"）
 TIMESTAMP_PATTERN = re.compile(r'^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\s*\d{1,2}:\d{1,2}\s*')
 
@@ -363,6 +365,13 @@ def extract_search_keywords(query: str) -> List[str]:
         if tag in _STOP_WORDS:
             continue
         keywords.add(tag)
+
+    # 补救：jieba.analyse.extract_tags 内部有 len<2 过滤，会丢弃所有“单字词”，
+    # 导致 "猫"/"狗"/"书" 这类查询提取不到关键词、检索为空（即使记忆里写着“布偶猫”）。
+    # 这里用全切分把“不在停用词表里的单字中文词”补回关键词集合。
+    for tok in jieba.lcut(cleaned):
+        if len(tok) == 1 and CJK_CHAR_PATTERN.match(tok) and tok not in _STOP_WORDS:
+            keywords.add(tok)
 
     return list(keywords)
 
