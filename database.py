@@ -710,6 +710,36 @@ async def get_photo(photo_id: int):
         return dict(row) if row else None
 
 
+async def memory_photo_count(memory_id: int) -> int:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT COUNT(*) AS n FROM memory_photos WHERE memory_id = $1", memory_id)
+        return int(row['n']) if row else 0
+
+
+async def delete_memory_photos(memory_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM memory_photos WHERE memory_id = $1", memory_id)
+
+
+async def get_mw_meta(memory_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT mw_meta FROM memories WHERE id = $1", memory_id)
+        if not row or row['mw_meta'] is None:
+            return None
+        v = row['mw_meta']
+        return v if isinstance(v, dict) else json.loads(v)
+
+
+async def update_mw_meta(memory_id: int, mw_meta: dict):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE memories SET mw_meta = $2::jsonb WHERE id = $1",
+                           memory_id, json.dumps(mw_meta, ensure_ascii=False))
+
+
 async def search_memories(query: str, limit: int = 10):
     """
     搜索相关记忆

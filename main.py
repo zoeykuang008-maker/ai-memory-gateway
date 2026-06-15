@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
-from database import save_migrated_memory, find_memory_by_mw_id, save_photo, link_photo_to_memory, get_photo
+from database import save_migrated_memory, find_memory_by_mw_id, save_photo, link_photo_to_memory, get_photo, memory_photo_count, delete_memory_photos, get_mw_meta, update_mw_meta
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories
 
@@ -1760,15 +1760,6 @@ async def api_migrate_memory_wall(request: Request):
     summary_threshold = int(body.get("summary_threshold", 400))
     author_cn_map = {"ruanruan": "阮阮", "xiaoke": "小克"}
 
-    # 0) 清理上次失败迁移留下的孤儿照片（memory_id 未关联），避免重复累积
-    if not dry_run:
-        try:
-            _pool = await get_pool()
-            async with _pool.acquire() as _conn:
-                await _conn.execute("DELETE FROM memory_photos WHERE memory_id IS NULL")
-        except Exception as _ce:
-            print(f"⚠️ 清理孤儿照片失败: {_ce}")
-
     # 1) 服务端拉取回忆墙全部条目
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -1784,15 +1775,61 @@ async def api_migrate_memory_wall(request: Request):
     out = {"status": "ok", "dry_run": dry_run, "source": source, "source_count": len(entries),
            "migrated": 0, "skipped_existing": 0, "photos_stored": 0, "errors": [], "items": []}
 
+    async def _fetch_store_photos(src_photos, memory_id):
+        """拉取并存照片，直接关联到 memory_id（绝不留 NULL，避免被误删），返回引用列表"""
+        refs = []
+        for p in src_photos:
+            fp = p.get("file_path") or ""
+            if not fp:
+                continue
+            purl = fp if fp.startswith("http") else f"{source}{fp}"
+            try:
+                async with httpx.AsyncClient(timeout=60) as pc:
+                    pr = await pc.get(purl)
+                if pr.status_code == 200 and pr.content:
+                    mime = (pr.headers.get("content-type") or "image/png").split(";")[0].strip()
+                    pid = await save_photo(memory_id, p.get("original_name"), mime, pr.content)
+                    refs.append({"photo_id": pid, "original_name": p.get("original_name"),
+                                 "mime": mime, "url": f"/api/photos/{pid}", "bytes": len(pr.content)})
+                    out["photos_stored"] += 1
+                else:
+                    out["errors"].append(f"photo {purl} HTTP {pr.status_code}")
+            except Exception as pe:
+                out["errors"].append(f"photo {purl}: {pe}")
+        return refs
+
     for e in entries:
         try:
             oid = str(e.get("id"))
+            src_photos = e.get("photos") or []
             existing = await find_memory_by_mw_id(oid)
-            if existing:
-                out["skipped_existing"] += 1
-                out["items"].append({"original_id": oid, "status": "skipped_existing", "memory_id": existing})
+
+            if dry_run:
+                bt = (e.get("content") or "").strip()
+                out["items"].append({"original_id": oid,
+                                     "status": "skipped_existing" if existing else "would_migrate",
+                                     "title": (e.get("title") or "").strip(),
+                                     "will_summarize": len(bt) > summary_threshold,
+                                     "photos": len(src_photos)})
+                if existing:
+                    out["skipped_existing"] += 1
                 continue
 
+            if existing:
+                mid = existing
+                out["skipped_existing"] += 1
+                # 自愈：记忆已存在但照片缺失（被旧bug误删）→ 清掉残留并重抓补齐
+                if src_photos and await memory_photo_count(mid) < len(src_photos):
+                    await delete_memory_photos(mid)
+                    refs = await _fetch_store_photos(src_photos, mid)
+                    meta = await get_mw_meta(mid) or {}
+                    meta["photos"] = refs
+                    await update_mw_meta(mid, meta)
+                out["items"].append({"original_id": oid, "status": "skipped_existing",
+                                     "memory_id": mid, "photos": await memory_photo_count(mid)})
+                continue
+
+            # ---- 新记忆 ----
             title = (e.get("title") or "").strip()
             body_text = (e.get("content") or "").strip()
             mood = e.get("mood")
@@ -1803,9 +1840,8 @@ async def api_migrate_memory_wall(request: Request):
             location = e.get("location")
             author_cn = author_cn_map.get(author, author or "")
 
-            # 长文额外配检索摘要（haiku），不改原文
             summary = ""
-            if len(body_text) > summary_threshold and not dry_run:
+            if len(body_text) > summary_threshold:
                 try:
                     summary = await generate_summary([{"role": "user", "content": f"{title}\n{body_text}"}])
                 except Exception as se:
@@ -1819,49 +1855,20 @@ async def api_migrate_memory_wall(request: Request):
                 parts.append(body_text)
             content = "\n\n".join([p for p in parts if p and p.strip()])
             importance = 9 if mood == "纪念" else 8
-
-            # 照片：服务端从回忆墙拉二进制，存进 Postgres
-            photo_refs = []
-            for p in (e.get("photos") or []):
-                fp = p.get("file_path") or ""
-                if not fp:
-                    continue
-                purl = fp if fp.startswith("http") else f"{source}{fp}"
-                if dry_run:
-                    photo_refs.append({"original_name": p.get("original_name"), "src_url": purl, "dry_run": True})
-                    continue
-                try:
-                    async with httpx.AsyncClient(timeout=60) as pc:
-                        pr = await pc.get(purl)
-                    if pr.status_code == 200 and pr.content:
-                        mime = (pr.headers.get("content-type") or "image/png").split(";")[0].strip()
-                        pid = await save_photo(None, p.get("original_name"), mime, pr.content)
-                        photo_refs.append({"photo_id": pid, "original_name": p.get("original_name"),
-                                           "mime": mime, "url": f"/api/photos/{pid}", "bytes": len(pr.content)})
-                        out["photos_stored"] += 1
-                    else:
-                        out["errors"].append(f"photo {purl} HTTP {pr.status_code}")
-                except Exception as pe:
-                    out["errors"].append(f"photo {purl}: {pe}")
-
             mw_meta = {"original_id": oid, "date": created_at, "author": author, "author_cn": author_cn,
                        "mood": mood, "source": src, "is_period_day": is_period, "location": location,
-                       "title": title, "photos": photo_refs}
+                       "title": title, "photos": []}
 
-            if dry_run:
-                out["items"].append({"original_id": oid, "status": "would_migrate", "title": title,
-                                     "content_len": len(content), "will_summarize": len(body_text) > summary_threshold,
-                                     "photos": len(photo_refs)})
-                continue
-
+            # 先插记忆，再抓照片直接关联到 mid（掉线也不会留下游离照片）
             mid = await save_migrated_memory(content=content, importance=importance, title=title,
                                              event_date=created_at, created_at=created_at, mw_meta=mw_meta)
-            for pr_ in photo_refs:
-                if pr_.get("photo_id"):
-                    await link_photo_to_memory(pr_["photo_id"], mid)
+            refs = await _fetch_store_photos(src_photos, mid)
+            if refs:
+                mw_meta["photos"] = refs
+                await update_mw_meta(mid, mw_meta)
             out["migrated"] += 1
             out["items"].append({"original_id": oid, "memory_id": mid, "status": "migrated",
-                                 "title": title, "photos": len(photo_refs)})
+                                 "title": title, "photos": len(refs)})
         except Exception as ie:
             out["errors"].append(f"entry {e.get('id')}: {ie}")
 
