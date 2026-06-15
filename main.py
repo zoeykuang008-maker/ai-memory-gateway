@@ -21,11 +21,12 @@ import httpx
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
+from database import save_migrated_memory, find_memory_by_mw_id, save_photo, link_photo_to_memory, get_photo
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories
 
@@ -1739,6 +1740,132 @@ async def api_manual_consolidate(request: Request):
 async def api_consolidate_status():
     """查询整理任务状态"""
     return _consolidate_status
+
+
+@app.post("/api/migrate/memory-wall")
+async def api_migrate_memory_wall(request: Request):
+    """一次性迁移回忆墙：服务端从回忆墙拉取全部回忆，作为完整记忆单元写入网关。
+    服务端拉取（含照片二进制），避免大包经客户端代理。幂等：按原始ID跳过已迁移。
+    body: {source_url, password, dry_run, summary_threshold}
+    """
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    source = (body.get("source_url") or "http://43.156.151.40:3000").rstrip("/")
+    password = body.get("password") or ""
+    dry_run = bool(body.get("dry_run", False))
+    summary_threshold = int(body.get("summary_threshold", 400))
+    author_cn_map = {"ruanruan": "阮阮", "xiaoke": "小克"}
+
+    # 1) 服务端拉取回忆墙全部条目
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(f"{source}/api/memories?limit=500", headers={"x-password": password})
+        if r.status_code != 200:
+            return {"status": "error", "step": "fetch_entries", "http": r.status_code, "body": r.text[:300]}
+        entries = r.json()
+    except Exception as e:
+        return {"status": "error", "step": "fetch_entries", "error": str(e)}
+    if not isinstance(entries, list):
+        return {"status": "error", "step": "fetch_entries", "error": "返回不是数组", "raw": str(entries)[:300]}
+
+    out = {"status": "ok", "dry_run": dry_run, "source": source, "source_count": len(entries),
+           "migrated": 0, "skipped_existing": 0, "photos_stored": 0, "errors": [], "items": []}
+
+    for e in entries:
+        try:
+            oid = str(e.get("id"))
+            existing = await find_memory_by_mw_id(oid)
+            if existing:
+                out["skipped_existing"] += 1
+                out["items"].append({"original_id": oid, "status": "skipped_existing", "memory_id": existing})
+                continue
+
+            title = (e.get("title") or "").strip()
+            body_text = (e.get("content") or "").strip()
+            mood = e.get("mood")
+            author = e.get("author")
+            src = e.get("source")
+            is_period = 1 if e.get("is_period_day") else 0
+            created_at = e.get("created_at")
+            location = e.get("location")
+            author_cn = author_cn_map.get(author, author or "")
+
+            # 长文额外配检索摘要（haiku），不改原文
+            summary = ""
+            if len(body_text) > summary_threshold and not dry_run:
+                try:
+                    summary = await generate_summary([{"role": "user", "content": f"{title}\n{body_text}"}])
+                except Exception as se:
+                    out["errors"].append(f"summary {oid}: {se}")
+
+            header = f"【回忆 · {str(created_at)[:10]} · {author_cn}" + (f" · {mood}" if mood else "") + "】"
+            parts = [header + (title or "")]
+            if summary:
+                parts.append(f"〔检索摘要〕{summary}")
+            if body_text:
+                parts.append(body_text)
+            content = "\n\n".join([p for p in parts if p and p.strip()])
+            importance = 9 if mood == "纪念" else 8
+
+            # 照片：服务端从回忆墙拉二进制，存进 Postgres
+            photo_refs = []
+            for p in (e.get("photos") or []):
+                fp = p.get("file_path") or ""
+                if not fp:
+                    continue
+                purl = fp if fp.startswith("http") else f"{source}{fp}"
+                if dry_run:
+                    photo_refs.append({"original_name": p.get("original_name"), "src_url": purl, "dry_run": True})
+                    continue
+                try:
+                    async with httpx.AsyncClient(timeout=60) as pc:
+                        pr = await pc.get(purl)
+                    if pr.status_code == 200 and pr.content:
+                        mime = (pr.headers.get("content-type") or "image/png").split(";")[0].strip()
+                        pid = await save_photo(None, p.get("original_name"), mime, pr.content)
+                        photo_refs.append({"photo_id": pid, "original_name": p.get("original_name"),
+                                           "mime": mime, "url": f"/api/photos/{pid}", "bytes": len(pr.content)})
+                        out["photos_stored"] += 1
+                    else:
+                        out["errors"].append(f"photo {purl} HTTP {pr.status_code}")
+                except Exception as pe:
+                    out["errors"].append(f"photo {purl}: {pe}")
+
+            mw_meta = {"original_id": oid, "date": created_at, "author": author, "author_cn": author_cn,
+                       "mood": mood, "source": src, "is_period_day": is_period, "location": location,
+                       "title": title, "photos": photo_refs}
+
+            if dry_run:
+                out["items"].append({"original_id": oid, "status": "would_migrate", "title": title,
+                                     "content_len": len(content), "will_summarize": len(body_text) > summary_threshold,
+                                     "photos": len(photo_refs)})
+                continue
+
+            mid = await save_migrated_memory(content=content, importance=importance, title=title,
+                                             event_date=created_at, created_at=created_at, mw_meta=mw_meta)
+            for pr_ in photo_refs:
+                if pr_.get("photo_id"):
+                    await link_photo_to_memory(pr_["photo_id"], mid)
+            out["migrated"] += 1
+            out["items"].append({"original_id": oid, "memory_id": mid, "status": "migrated",
+                                 "title": title, "photos": len(photo_refs)})
+        except Exception as ie:
+            out["errors"].append(f"entry {e.get('id')}: {ie}")
+
+    return out
+
+
+@app.get("/api/photos/{photo_id}")
+async def api_get_photo(photo_id: int):
+    """读取迁移照片二进制（受 gateway_key 保护，img src 可带 ?gateway_key=）"""
+    row = await get_photo(photo_id)
+    if not row:
+        return JSONResponse(status_code=404, content={"error": "photo not found"})
+    return Response(content=bytes(row["data"]), media_type=row.get("mime") or "image/png")
 
 
 @app.post("/api/memories/{memory_id}/promote")

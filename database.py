@@ -9,6 +9,7 @@
 
 import os
 import re
+import json
 from typing import Optional, List
 from datetime import datetime, timedelta, timezone as dt_timezone
 
@@ -216,6 +217,33 @@ async def init_tables():
         """)
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_memories_event_date ON memories (event_date);
+        """)
+
+        # ---- 回忆墙迁移字段：结构化保存原始字段，不压扁成纯文本 ----
+        # mw_meta JSONB: {original_id, date, author, author_cn, mood, source, is_period_day, location, title, photos:[{photo_id,original_name,mime,url}]}
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'mw_meta'
+                ) THEN
+                    ALTER TABLE memories ADD COLUMN mw_meta JSONB DEFAULT NULL;
+                END IF;
+            END $$;
+        """)
+        # 照片二进制长期存储（随网关 Postgres 一起持久化，独立于回忆墙服务器）
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS memory_photos (
+                id            SERIAL PRIMARY KEY,
+                memory_id     INTEGER,
+                original_name TEXT,
+                mime          TEXT DEFAULT 'image/png',
+                data          BYTEA NOT NULL,
+                created_at    TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memory_photos_memory ON memory_photos (memory_id);
         """)
         
         # 尝试启用pgvector扩展（向量搜索）
@@ -616,6 +644,72 @@ async def save_memory(content: str, importance: int = 5, source_session: str = "
                 print(f"⚠️ 记忆 {row['id']} embedding自动计算失败: {e}")
 
 
+# ---- 回忆墙迁移辅助函数 ----
+
+async def find_memory_by_mw_id(original_id: str):
+    """按回忆墙原始ID查已迁移记忆（幂等：避免重复迁移）"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id FROM memories WHERE mw_meta->>'original_id' = $1 LIMIT 1",
+            str(original_id),
+        )
+        return row['id'] if row else None
+
+
+async def save_migrated_memory(content, importance, title, event_date, created_at, mw_meta):
+    """插入一条完整的回忆墙记忆（layer=3 核心记忆，结构化字段存 mw_meta，不切碎）"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO memories (content, importance, source_session, layer, is_active, title, event_date, created_at, mw_meta)
+            VALUES ($1, $2, 'memory_wall', 3, TRUE, $3, $4::date, $5::timestamptz, $6::jsonb)
+            RETURNING id
+            """,
+            content, importance, (title or None),
+            (str(event_date)[:10] if event_date else None),
+            (str(created_at) if created_at else None),
+            json.dumps(mw_meta, ensure_ascii=False),
+        )
+        mid = row['id']
+        if MEMORY_VECTOR_ENABLED:
+            try:
+                embedding = await compute_embedding(content)
+                if embedding:
+                    await save_memory_embedding(conn, mid, embedding)
+            except Exception as e:
+                print(f"⚠️ 迁移记忆 {mid} embedding计算失败: {e}")
+        return mid
+
+
+async def save_photo(memory_id, original_name, mime, data: bytes):
+    """把照片二进制存进 Postgres，返回 photo id"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO memory_photos (memory_id, original_name, mime, data) VALUES ($1, $2, $3, $4) RETURNING id",
+            memory_id, original_name, (mime or 'image/png'), data,
+        )
+        return row['id']
+
+
+async def link_photo_to_memory(photo_id: int, memory_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE memory_photos SET memory_id = $2 WHERE id = $1", photo_id, memory_id)
+
+
+async def get_photo(photo_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, memory_id, original_name, mime, data FROM memory_photos WHERE id = $1",
+            photo_id,
+        )
+        return dict(row) if row else None
+
+
 async def search_memories(query: str, limit: int = 10):
     """
     搜索相关记忆
@@ -935,8 +1029,9 @@ async def backfill_memory_embeddings(batch_size: int = 20):
 async def get_recent_memories(limit: int = 20):
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # 只取活跃记忆：避免已归档/去重停用的碎片污染提取去重上下文，并防复发
         return await conn.fetch(
-            "SELECT id, content, importance, created_at FROM memories ORDER BY created_at DESC LIMIT $1",
+            "SELECT id, content, importance, created_at FROM memories WHERE is_active = TRUE ORDER BY created_at DESC LIMIT $1",
             limit,
         )
 
