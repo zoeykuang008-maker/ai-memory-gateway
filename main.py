@@ -1760,6 +1760,15 @@ async def api_migrate_memory_wall(request: Request):
     summary_threshold = int(body.get("summary_threshold", 400))
     author_cn_map = {"ruanruan": "阮阮", "xiaoke": "小克"}
 
+    # 0) 清理上次失败迁移留下的孤儿照片（memory_id 未关联），避免重复累积
+    if not dry_run:
+        try:
+            _pool = await get_pool()
+            async with _pool.acquire() as _conn:
+                await _conn.execute("DELETE FROM memory_photos WHERE memory_id IS NULL")
+        except Exception as _ce:
+            print(f"⚠️ 清理孤儿照片失败: {_ce}")
+
     # 1) 服务端拉取回忆墙全部条目
     try:
         async with httpx.AsyncClient(timeout=30) as client:

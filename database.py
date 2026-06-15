@@ -664,7 +664,7 @@ async def save_migrated_memory(content, importance, title, event_date, created_a
         row = await conn.fetchrow(
             """
             INSERT INTO memories (content, importance, source_session, layer, is_active, title, event_date, created_at, mw_meta)
-            VALUES ($1, $2, 'memory_wall', 3, TRUE, $3, $4::date, $5::timestamptz, $6::jsonb)
+            VALUES ($1, $2, 'memory_wall', 3, TRUE, $3, $4::text::date, $5::text::timestamptz, $6::jsonb)
             RETURNING id
             """,
             content, importance, (title or None),
