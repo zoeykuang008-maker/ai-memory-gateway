@@ -303,6 +303,13 @@ async def gateway_auth_middleware(request: Request, call_next):
 # 记忆注入
 # ============================================================
 
+# 健康/用药安全护栏：随记忆一起注入，防止 AI 凭单条记忆笃定地指导用药/剂量
+HEALTH_SAFETY_NOTE = """# 健康/用药特别注意（最高优先级，优先于以上记忆）
+- 涉及吃药、剂量、空腹与否、能否同服、医疗建议时，绝不能仅凭某一条记忆就笃定地指导阮阮。
+- 记忆只作参考、不作医嘱；务必提示她以药品说明书或医生为准，让她自己确认。
+- 记忆之间有冲突、或你不确定时，明确说出不确定，宁可让她核实，也不要给确定的用药/剂量指令。错的医疗信息比漏记危险得多。"""
+
+
 async def build_system_prompt_with_memories(user_message: str) -> str:
     """
     构建带记忆的 system prompt
@@ -353,8 +360,10 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
 - 避免机械式表达如"根据我的记忆..."或"检索到的信息显示..."
 - 共同经历可温情回忆："上次那个事挺好玩的"
 
-记忆是丰富对话的工具，而非对话焦点。"""
-        
+记忆是丰富对话的工具，而非对话焦点。
+
+{HEALTH_SAFETY_NOTE}"""
+
         print(f"📚 注入了 {len(memories)} 条相关记忆")
         return enhanced_prompt
         
@@ -511,7 +520,7 @@ def _apply_breakpoint(msg: dict) -> bool:
     
     # content 是纯字符串
     if isinstance(content, str) and content.strip():
-        msg['content'] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+        msg['content'] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
         return True
     
     # content 是 block 数组（多模态消息）
@@ -520,7 +529,7 @@ def _apply_breakpoint(msg: dict) -> bool:
         for i in range(len(content) - 1, -1, -1):
             block = content[i]
             if isinstance(block, dict) and block.get("type") == "text" and block.get("text", "").strip():
-                block["cache_control"] = {"type": "ephemeral"}
+                block["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
                 return True
     
     return False
@@ -619,7 +628,7 @@ async def build_partitioned_messages(
     if base_prompt:
         result.append({
             "role": "system",
-            "content": [{"type": "text", "text": base_prompt, "cache_control": {"type": "ephemeral"}}]
+            "content": [{"type": "text", "text": base_prompt, "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
         })
     
     # 摘要区（多block，尾部追加模式）
@@ -628,7 +637,7 @@ async def build_partitioned_messages(
         for i, part in enumerate(summary_parts):
             item = {"type": "text", "text": part}
             if i == len(summary_parts) - 1:
-                item["cache_control"] = {"type": "ephemeral"}
+                item["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
             blocks.append(item)
         result.append({"role": "user", "content": blocks})
         result.append({"role": "assistant", "content": "好的，我已了解之前的对话内容。"})
@@ -698,7 +707,7 @@ async def _build_basic_cached(
     if base_prompt:
         result.append({
             "role": "system",
-            "content": [{"type": "text", "text": base_prompt, "cache_control": {"type": "ephemeral"}}]
+            "content": [{"type": "text", "text": base_prompt, "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
         })
     
     h_cleaned = [{k: v for k, v in msg.items() if k not in ('created_at',)} for msg in history]
@@ -757,7 +766,7 @@ async def build_memory_text(user_message: str) -> str:
             memory_lines.append(f"- {date_str}{mem['content']}")
         
         print(f"📚 注入了 {len(memories)} 条相关记忆")
-        return "【从过往对话中检索到的相关记忆】\n" + "\n".join(memory_lines)
+        return "【从过往对话中检索到的相关记忆】\n" + "\n".join(memory_lines) + "\n\n" + HEALTH_SAFETY_NOTE
     except Exception as e:
         print(f"⚠️ 记忆检索失败: {e}")
         return ""
