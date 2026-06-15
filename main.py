@@ -423,7 +423,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
         content = msg['content'] if isinstance(msg['content'], str) else str(msg['content'])
         conversation_text += f"{role_label}: {content}\n\n"
     
-    prompt = f"""请将以下对话压缩成简洁摘要。保留关键信息（事件、决定、情感、约定），去掉日常寒暄和重复内容。用第三人称叙述，控制在300字以内。
+    prompt = f"""请将以下对话压缩成简洁摘要。保留关键信息（事件、决定、情感、约定），去掉日常寒暄和重复内容。注意保留情绪基调及其流动变化——情绪是流动的、会变化但前后有联系，不要压成干巴巴的事实。用第三人称叙述，控制在300字以内。
 
 ---
 {conversation_text}
@@ -872,7 +872,7 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
             print(f"📝 轮次 {_round_counter}，执行记忆提取")
         
         # 3. 获取已有记忆，传给提取模型做对比去重
-        existing = await get_recent_memories(limit=80)
+        existing = await get_recent_memories(limit=40)
         existing_contents = [r["content"] for r in existing]
         
         # 4. 构建用于提取的消息列表
@@ -911,16 +911,29 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 continue
             filtered_memories.append(mem)
         
+        saved = 0
+        skipped_dup = 0
         for mem in filtered_memories:
+            # DB 层去重门：避免每轮把同一事实反复重写入库（软去重靠不住，根因在此）
+            try:
+                dup = await check_duplicate_memory(mem["content"])
+            except Exception as de:
+                print(f"⚠️ 去重检查异常，按非重复处理: {de}")
+                dup = {"is_duplicate": False}
+            if dup.get("is_duplicate"):
+                skipped_dup += 1
+                print(f"🔁 跳过重复记忆（{dup.get('reason')}, 命中#{dup.get('matched_id')}）: {mem['content'][:50]}...")
+                continue
             await save_memory(
                 content=mem["content"],
                 importance=mem["importance"],
                 source_session=session_id,
             )
-        
-        if filtered_memories:
+            saved += 1
+
+        if saved or skipped_dup:
             total = await get_all_memories_count()
-            print(f"💾 已保存 {len(filtered_memories)} 条新记忆（过滤了 {len(new_memories) - len(filtered_memories)} 条），总计 {total} 条")
+            print(f"💾 已保存 {saved} 条新记忆（去重跳过 {skipped_dup} 条，meta过滤 {len(new_memories) - len(filtered_memories)} 条），总计 {total} 条")
             
     except Exception as e:
         print(f"⚠️  后台记忆处理失败: {e}")
