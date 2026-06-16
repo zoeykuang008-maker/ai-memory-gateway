@@ -117,6 +117,9 @@ function switchSection(name) {
     if (name === 'settings') {
         loadSettings();
     }
+    if (name === 'memorywall') {
+        loadMemoryWall();
+    }
 }
 
 // ============================================
@@ -2122,4 +2125,160 @@ function showSettingsMsg(type, text) {
     el.className = 'msg-box msg-' + type;
     el.textContent = text;
     setTimeout(() => { el.style.display = 'none'; }, 5000);
+}
+
+// ============================================
+// 回忆墙视图（可看可写）。所有操作走 /api/memorywall*，
+// 与未来的 MCP 出口共用同一组端点。
+// ============================================
+let _mwCache = [];
+const MW_MOOD_EMOJI = {纪念:'🎗️', 开心:'😊', 感动:'🥺', 搞笑:'😂', 温柔:'🌷', 日常:'☕', 难过:'😢'};
+const MW_SRC_CN = {manual:'手动', claude:'Claude', tavern:'酒馆'};
+
+async function loadMemoryWall() {
+    const list = document.getElementById('mwList');
+    if (!list) return;
+    const author = (document.getElementById('mwFilterAuthor') || {}).value || '';
+    const mood = (document.getElementById('mwFilterMood') || {}).value || '';
+    list.innerHTML = '<div class="mw-empty">加载中…</div>';
+    try {
+        const params = new URLSearchParams();
+        if (author) params.set('author', author);
+        if (mood) params.set('mood', mood);
+        const resp = await fetch('/api/memorywall?' + params.toString());
+        const data = await resp.json();
+        _mwCache = data.items || [];
+        const cnt = document.getElementById('mwCount');
+        if (cnt) cnt.textContent = _mwCache.length ? `共 ${_mwCache.length} 条` : '';
+        if (!_mwCache.length) { list.innerHTML = '<div class="mw-empty">还没有回忆，点「写一条回忆」开始吧～</div>'; return; }
+        list.innerHTML = _mwCache.map(renderMwCard).join('');
+    } catch (e) {
+        list.innerHTML = '<div class="mw-empty">加载失败：' + escapeHtml(String(e)) + '</div>';
+    }
+}
+
+function mwPhotoSrc(pid) { return `/api/photos/${pid}?gateway_key=${encodeURIComponent(_gatewayKey)}`; }
+
+function renderMwCard(m) {
+    const date = (m.date || '').slice(0, 10);
+    const authorCn = m.author_cn || m.author || '';
+    const moodBadge = m.mood ? `<span class="mw-badge mood">${MW_MOOD_EMOJI[m.mood] || ''} ${escapeHtml(m.mood)}</span>` : '';
+    const periodBadge = m.is_period_day ? `<span class="mw-badge period">🌸 生理期</span>` : '';
+    const srcBadge = m.source ? `<span class="mw-badge src">${escapeHtml(MW_SRC_CN[m.source] || m.source)}</span>` : '';
+    const photos = (m.photos || []).map(p => `<img class="mw-thumb" src="${mwPhotoSrc(p.photo_id)}" onclick="window.open(this.src,'_blank')" alt="">`).join('');
+    const body = escapeHtml(m.body || '').replace(/\n/g, '<br>');
+    const longCls = (m.body || '').length > 220 ? ' mw-collapsed' : '';
+    return `
+    <div class="mw-card" data-id="${m.id}">
+        <div class="mw-card-head">
+            <div class="mw-title">${escapeHtml(m.title || '(无标题)')}</div>
+            <div class="mw-actions">
+                <button class="btn btn-sm" onclick="editMw(${m.id})">编辑</button>
+                <button class="btn btn-sm mw-danger" onclick="deleteMw(${m.id})">删除</button>
+            </div>
+        </div>
+        <div class="mw-meta">
+            <span class="mw-badge author">${escapeHtml(authorCn)}</span>
+            ${moodBadge}${srcBadge}${periodBadge}
+            <span class="mw-date">📅 ${escapeHtml(date)}</span>
+        </div>
+        ${photos ? `<div class="mw-photos">${photos}</div>` : ''}
+        <div class="mw-body${longCls}" onclick="this.classList.toggle('mw-collapsed')">${body}</div>
+    </div>`;
+}
+
+function _mwForm() {
+    return {
+        modal: document.getElementById('mwModal'),
+        id: document.getElementById('mwEditId'),
+        title: document.getElementById('mwTitle'),
+        body: document.getElementById('mwBody'),
+        author: document.getElementById('mwAuthor'),
+        mood: document.getElementById('mwMood'),
+        source: document.getElementById('mwSource'),
+        date: document.getElementById('mwDate'),
+        location: document.getElementById('mwLocation'),
+        period: document.getElementById('mwPeriod'),
+        photosEdit: document.getElementById('mwPhotosEdit'),
+        file: document.getElementById('mwPhotoFile'),
+    };
+}
+
+function _localDateValue(iso) {
+    const d = iso ? new Date(iso) : new Date();
+    d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+    return d.toISOString().slice(0, 16);
+}
+
+function openMwForm() {
+    const f = _mwForm();
+    document.getElementById('mwModalTitle').textContent = '写一条回忆';
+    f.id.value = ''; f.title.value = ''; f.body.value = ''; f.author.value = 'ruanruan';
+    f.mood.value = ''; f.source.value = 'manual'; f.location.value = ''; f.period.checked = false;
+    f.date.value = _localDateValue(null);
+    f.photosEdit.innerHTML = ''; f.file.value = '';
+    f.modal.style.display = 'flex';
+}
+
+function editMw(id) {
+    const m = _mwCache.find(x => x.id === id);
+    if (!m) return;
+    const f = _mwForm();
+    document.getElementById('mwModalTitle').textContent = '编辑回忆';
+    f.id.value = m.id;
+    f.title.value = m.title || ''; f.body.value = m.body || '';
+    f.author.value = m.author || 'ruanruan'; f.mood.value = m.mood || '';
+    f.source.value = m.source || 'manual'; f.location.value = m.location || '';
+    f.period.checked = !!m.is_period_day;
+    f.date.value = _localDateValue(m.date);
+    f.file.value = '';
+    f.photosEdit.innerHTML = (m.photos || []).map(p =>
+        `<span class="mw-pe"><img src="${mwPhotoSrc(p.photo_id)}"><button onclick="removeMwPhoto(${m.id},${p.photo_id})" title="删除照片">✕</button></span>`).join('');
+    f.modal.style.display = 'flex';
+}
+
+function closeMwForm() { document.getElementById('mwModal').style.display = 'none'; }
+
+async function saveMw() {
+    const f = _mwForm();
+    const btn = document.getElementById('mwSaveBtn');
+    const id = f.id.value;
+    const payload = {
+        title: f.title.value.trim(), body: f.body.value.trim(),
+        author: f.author.value, mood: f.mood.value || null, source: f.source.value,
+        is_period_day: f.period.checked ? 1 : 0, location: f.location.value.trim() || null,
+        date: f.date.value ? new Date(f.date.value).toISOString() : undefined,
+    };
+    if (!payload.title && !payload.body) { alert('标题和正文不能都为空'); return; }
+    btn.disabled = true; btn.textContent = '保存中…';
+    try {
+        let mid;
+        if (id) {
+            const r = await fetch('/api/memorywall/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const d = await r.json(); if (d.error) throw new Error(d.error); mid = id;
+        } else {
+            const r = await fetch('/api/memorywall', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const d = await r.json(); if (d.error) throw new Error(d.error); mid = d.item && d.item.id;
+        }
+        const files = f.file.files;
+        for (let i = 0; i < files.length; i++) {
+            const fd = new FormData(); fd.append('file', files[i]);
+            await fetch('/api/memorywall/' + mid + '/photos', { method: 'POST', body: fd });
+        }
+        closeMwForm(); loadMemoryWall();
+    } catch (e) {
+        alert('保存失败：' + e.message);
+    } finally { btn.disabled = false; btn.textContent = '保存'; }
+}
+
+async function deleteMw(id) {
+    if (!confirm('删除这条回忆？默认归档（软删，可在数据库恢复），不会真删。')) return;
+    try { await fetch('/api/memorywall/' + id, { method: 'DELETE' }); loadMemoryWall(); }
+    catch (e) { alert('删除失败：' + e.message); }
+}
+
+async function removeMwPhoto(mid, pid) {
+    if (!confirm('删除这张照片？')) return;
+    try { await fetch('/api/memorywall/' + mid + '/photos/' + pid, { method: 'DELETE' }); await loadMemoryWall(); editMw(mid); }
+    catch (e) { alert('删除失败：' + e.message); }
 }

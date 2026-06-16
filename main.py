@@ -20,13 +20,14 @@ import secrets
 import httpx
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
 from database import save_migrated_memory, find_memory_by_mw_id, save_photo, link_photo_to_memory, get_photo, memory_photo_count, delete_memory_photos, get_mw_meta, update_mw_meta
+from database import list_memorywall, get_memorywall_one, update_memorywall, get_memory_photos, set_memory_active
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories
 
@@ -1882,6 +1883,179 @@ async def api_get_photo(photo_id: int):
     if not row:
         return JSONResponse(status_code=404, content={"error": "photo not found"})
     return Response(content=bytes(row["data"]), media_type=row.get("mime") or "image/png")
+
+
+# ============================================================
+# 回忆墙视图 CRUD —— API-first：dashboard 与未来的 MCP 出口共用这组端点
+# “回忆” = memories 里 mw_meta 非空的记忆（迁入的 + dashboard 新建的），同库不同视图，
+# 因此它们也能被检索/注入给 AI（守铁律：界面可见=AI可感知）。
+# ============================================================
+
+MW_AUTHOR_CN = {"ruanruan": "阮阮", "xiaoke": "小克"}
+MW_SUMMARY_THRESHOLD = 400
+
+
+def _compose_mw_content(title, body, author, mood, created_at, summary):
+    author_cn = MW_AUTHOR_CN.get(author, author or "")
+    header = f"【回忆 · {str(created_at)[:10]} · {author_cn}" + (f" · {mood}" if mood else "") + "】"
+    parts = [header + (title or "")]
+    if summary:
+        parts.append(f"〔检索摘要〕{summary}")
+    if body:
+        parts.append(body)
+    return "\n\n".join([p for p in parts if p and p.strip()])
+
+
+def _extract_mw_body(content):
+    parts = (content or "").split("\n\n")
+    rest = parts[1:]
+    if rest and rest[0].startswith("〔检索摘要〕"):
+        rest = rest[1:]
+    return "\n\n".join(rest)
+
+
+def _mw_item(row):
+    mm = row.get("mw_meta") or {}
+    return {
+        "id": row["id"],
+        "title": row.get("title") or mm.get("title") or "",
+        "body": mm.get("body") or _extract_mw_body(row.get("content") or ""),
+        "author": mm.get("author"),
+        "author_cn": mm.get("author_cn") or MW_AUTHOR_CN.get(mm.get("author"), mm.get("author")),
+        "mood": mm.get("mood"),
+        "source": mm.get("source"),
+        "is_period_day": mm.get("is_period_day"),
+        "location": mm.get("location"),
+        "date": mm.get("date") or (str(row.get("created_at")) if row.get("created_at") else None),
+        "event_date": str(row["event_date"]) if row.get("event_date") else None,
+        "importance": row.get("importance"),
+        "is_active": row.get("is_active"),
+        "photos": row.get("photos", []),
+    }
+
+
+@app.get("/api/memorywall")
+async def api_mw_list(author: str = "", mood: str = "", include_inactive: bool = False):
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    rows = await list_memorywall(author or None, mood or None, include_inactive)
+    return {"items": [_mw_item(r) for r in rows], "total": len(rows)}
+
+
+@app.post("/api/memorywall")
+async def api_mw_create(request: Request):
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    b = await request.json()
+    title = (b.get("title") or "").strip()
+    body = (b.get("body") or b.get("content") or "").strip()
+    if not title and not body:
+        return JSONResponse(status_code=400, content={"error": "标题和正文不能都为空"})
+    author = b.get("author") or None
+    mood = b.get("mood") or None
+    source = b.get("source") or "manual"
+    is_period = 1 if b.get("is_period_day") else 0
+    location = b.get("location") or None
+    created_at = b.get("date") or datetime.now(timezone.utc).isoformat()
+    summary = ""
+    if len(body) > MW_SUMMARY_THRESHOLD:
+        try:
+            summary = await generate_summary([{"role": "user", "content": f"{title}\n{body}"}])
+        except Exception as se:
+            print(f"⚠️ 回忆摘要生成失败: {se}")
+    content = _compose_mw_content(title, body, author, mood, created_at, summary)
+    importance = 9 if mood == "纪念" else 8
+    mw_meta = {"original_id": f"dash-{int(datetime.now().timestamp()*1000)}",
+               "date": created_at, "author": author,
+               "author_cn": MW_AUTHOR_CN.get(author, author or ""),
+               "mood": mood, "source": source, "is_period_day": is_period,
+               "location": location, "title": title, "body": body, "photos": []}
+    mid = await save_migrated_memory(content=content, importance=importance, title=title,
+                                     event_date=created_at, created_at=created_at, mw_meta=mw_meta)
+    one = await get_memorywall_one(mid)
+    return {"status": "ok", "item": _mw_item(one) if one else {"id": mid}}
+
+
+@app.put("/api/memorywall/{mid}")
+async def api_mw_update(mid: int, request: Request):
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    existing = await get_memorywall_one(mid)
+    if not existing:
+        return JSONResponse(status_code=404, content={"error": "回忆不存在"})
+    mm = existing.get("mw_meta") or {}
+    b = await request.json()
+    title = (b["title"] if b.get("title") is not None else (mm.get("title") or existing.get("title") or "")).strip()
+    body = (b["body"] if b.get("body") is not None else _extract_mw_body(existing.get("content"))).strip()
+    author = b.get("author") if "author" in b else mm.get("author")
+    mood = b.get("mood") if "mood" in b else mm.get("mood")
+    source = b.get("source") if "source" in b else mm.get("source")
+    is_period = (1 if b.get("is_period_day") else 0) if "is_period_day" in b else mm.get("is_period_day", 0)
+    location = b.get("location") if "location" in b else mm.get("location")
+    created_at = b.get("date") or mm.get("date") or (str(existing.get("created_at")) if existing.get("created_at") else datetime.now(timezone.utc).isoformat())
+    summary = ""
+    if len(body) > MW_SUMMARY_THRESHOLD:
+        try:
+            summary = await generate_summary([{"role": "user", "content": f"{title}\n{body}"}])
+        except Exception as se:
+            print(f"⚠️ 回忆摘要更新失败: {se}")
+    content = _compose_mw_content(title, body, author, mood, created_at, summary)
+    importance = 9 if mood == "纪念" else 8
+    new_meta = dict(mm)
+    new_meta.update({"date": created_at, "author": author, "author_cn": MW_AUTHOR_CN.get(author, author or ""),
+                     "mood": mood, "source": source, "is_period_day": is_period, "location": location,
+                     "title": title, "body": body})
+    await update_memorywall(mid, content, title, importance, created_at, new_meta)
+    one = await get_memorywall_one(mid)
+    return {"status": "ok", "item": _mw_item(one) if one else {"id": mid}}
+
+
+@app.delete("/api/memorywall/{mid}")
+async def api_mw_delete(mid: int, hard: bool = False):
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    if hard:
+        await delete_memory_photos(mid)
+        await delete_memory(mid)
+        return {"status": "ok", "deleted": "hard", "id": mid}
+    await set_memory_active(mid, False)  # 软删=归档，守“一条不少”
+    return {"status": "ok", "deleted": "archived", "id": mid}
+
+
+@app.post("/api/memorywall/{mid}/photos")
+async def api_mw_upload_photo(mid: int, file: UploadFile = File(...)):
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    existing = await get_memorywall_one(mid)
+    if not existing:
+        return JSONResponse(status_code=404, content={"error": "回忆不存在"})
+    data = await file.read()
+    if not data:
+        return JSONResponse(status_code=400, content={"error": "空文件"})
+    mime = file.content_type or "image/png"
+    pid = await save_photo(mid, file.filename, mime, data)
+    mm = existing.get("mw_meta") or {}
+    photos = mm.get("photos") or []
+    photos.append({"photo_id": pid, "original_name": file.filename, "mime": mime,
+                   "url": f"/api/photos/{pid}", "bytes": len(data)})
+    mm["photos"] = photos
+    await update_mw_meta(mid, mm)
+    return {"status": "ok", "photo": {"photo_id": pid, "url": f"/api/photos/{pid}", "original_name": file.filename}}
+
+
+@app.delete("/api/memorywall/{mid}/photos/{pid}")
+async def api_mw_delete_photo(mid: int, pid: int):
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM memory_photos WHERE id = $1 AND memory_id = $2", pid, mid)
+    one = await get_memorywall_one(mid)
+    if one:
+        mm = one.get("mw_meta") or {}
+        mm["photos"] = [p for p in (mm.get("photos") or []) if p.get("photo_id") != pid]
+        await update_mw_meta(mid, mm)
+    return {"status": "ok"}
 
 
 @app.post("/api/memories/{memory_id}/promote")

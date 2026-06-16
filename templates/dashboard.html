@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Memory Gateway</title>
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=3.5">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=3.7-mw">
 </head>
 <body>
     <div class="dashboard">
@@ -18,6 +18,10 @@
                 <a href="#" class="nav-item active" data-section="manage">
                     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg></span>
                     <span class="nav-label">记忆管理</span>
+                </a>
+                <a href="#" class="nav-item" data-section="memorywall">
+                    <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg></span>
+                    <span class="nav-label">回忆墙</span>
                 </a>
                 <a href="#" class="nav-item" data-section="import">
                     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg></span>
@@ -50,6 +54,63 @@
 
         <!-- 主内容区 -->
         <main class="main-content">
+            <!-- 回忆墙 Section -->
+            <section id="section-memorywall" class="section">
+                <div class="section-header">
+                    <h1>🌸 回忆墙</h1>
+                    <p class="section-desc">阮阮 &amp; 小克的回忆 · 可看可写</p>
+                </div>
+                <div class="card">
+                    <div class="mw-toolbar">
+                        <select id="mwFilterAuthor" class="select-input" onchange="loadMemoryWall()">
+                            <option value="">全部作者</option>
+                            <option value="ruanruan">阮阮</option>
+                            <option value="xiaoke">小克</option>
+                        </select>
+                        <select id="mwFilterMood" class="select-input" onchange="loadMemoryWall()">
+                            <option value="">全部心情</option>
+                            <option>纪念</option><option>开心</option><option>感动</option>
+                            <option>搞笑</option><option>温柔</option><option>日常</option><option>难过</option>
+                        </select>
+                        <span id="mwCount" class="mw-count"></span>
+                        <button class="btn btn-primary" style="margin-left:auto" onclick="openMwForm()">＋ 写一条回忆</button>
+                    </div>
+                    <div id="mwList" class="mw-list"><div class="mw-empty">加载中…</div></div>
+                </div>
+            </section>
+
+            <!-- 回忆墙 写/编辑 弹窗 -->
+            <div id="mwModal" class="mw-overlay" style="display:none">
+                <div class="mw-modal">
+                    <h3 id="mwModalTitle">写一条回忆</h3>
+                    <input type="hidden" id="mwEditId" value="">
+                    <label class="mw-lbl">标题</label>
+                    <input type="text" id="mwTitle" class="search-input" placeholder="给这条回忆起个标题">
+                    <label class="mw-lbl">正文</label>
+                    <textarea id="mwBody" class="mw-textarea" rows="8" placeholder="写下这段回忆…（超过400字会自动配一段检索摘要）"></textarea>
+                    <div class="mw-form-row">
+                        <div><label class="mw-lbl">作者</label>
+                            <select id="mwAuthor" class="select-input"><option value="ruanruan">阮阮</option><option value="xiaoke">小克</option></select></div>
+                        <div><label class="mw-lbl">心情</label>
+                            <select id="mwMood" class="select-input"><option value="">—</option><option>纪念</option><option>开心</option><option>感动</option><option>搞笑</option><option>温柔</option><option>日常</option><option>难过</option></select></div>
+                        <div><label class="mw-lbl">来源</label>
+                            <select id="mwSource" class="select-input"><option value="manual">手动</option><option value="claude">Claude</option><option value="tavern">酒馆</option></select></div>
+                    </div>
+                    <div class="mw-form-row">
+                        <div><label class="mw-lbl">日期</label><input type="datetime-local" id="mwDate" class="search-input"></div>
+                        <div><label class="mw-lbl">地点</label><input type="text" id="mwLocation" class="search-input" placeholder="可选"></div>
+                        <div class="mw-period"><label class="mw-lbl">生理期</label><label class="mw-check"><input type="checkbox" id="mwPeriod"> 是</label></div>
+                    </div>
+                    <div id="mwPhotosEdit" class="mw-photos-edit"></div>
+                    <label class="mw-lbl">添加照片（可多选）</label>
+                    <input type="file" id="mwPhotoFile" accept="image/*" multiple>
+                    <div class="mw-modal-actions">
+                        <button class="btn btn-secondary" onclick="closeMwForm()">取消</button>
+                        <button class="btn btn-primary" id="mwSaveBtn" onclick="saveMw()">保存</button>
+                    </div>
+                </div>
+            </div>
+
             <!-- 记忆管理 Section -->
             <section id="section-manage" class="section active">
                 <div class="section-header">
@@ -610,6 +671,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.6"></script>
+    <script src="/static/js/dashboard.js?v=3.7-mw"></script>
 </body>
 </html>

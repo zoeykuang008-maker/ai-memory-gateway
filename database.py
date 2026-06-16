@@ -740,6 +740,98 @@ async def update_mw_meta(memory_id: int, mw_meta: dict):
                            memory_id, json.dumps(mw_meta, ensure_ascii=False))
 
 
+# ---- 回忆墙视图：CRUD（“回忆”= mw_meta 非空的记忆）----
+
+def _row_to_mw(row):
+    d = dict(row)
+    mm = d.get('mw_meta')
+    if isinstance(mm, str):
+        try:
+            mm = json.loads(mm)
+        except Exception:
+            mm = {}
+    d['mw_meta'] = mm or {}
+    return d
+
+
+async def get_memory_photos(memory_id: int):
+    """某条记忆的照片引用（不含二进制）"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, original_name, mime FROM memory_photos WHERE memory_id = $1 ORDER BY id",
+            memory_id,
+        )
+        return [{"photo_id": r["id"], "original_name": r["original_name"],
+                 "mime": r["mime"], "url": f"/api/photos/{r['id']}"} for r in rows]
+
+
+async def list_memorywall(author: str = None, mood: str = None, include_inactive: bool = False):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        sql = "SELECT id, content, title, importance, created_at, event_date, is_active, mw_meta FROM memories WHERE mw_meta IS NOT NULL"
+        params = []
+        if not include_inactive:
+            sql += " AND is_active = TRUE"
+        if author:
+            params.append(author); sql += f" AND mw_meta->>'author' = ${len(params)}"
+        if mood:
+            params.append(mood); sql += f" AND mw_meta->>'mood' = ${len(params)}"
+        sql += " ORDER BY COALESCE(event_date, created_at::date) DESC, created_at DESC"
+        rows = await conn.fetch(sql, *params)
+    out = []
+    for r in rows:
+        d = _row_to_mw(r)
+        d['photos'] = await get_memory_photos(d['id'])
+        out.append(d)
+    return out
+
+
+async def get_memorywall_one(memory_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, content, title, importance, created_at, event_date, is_active, mw_meta FROM memories WHERE id = $1 AND mw_meta IS NOT NULL",
+            memory_id,
+        )
+    if not row:
+        return None
+    d = _row_to_mw(row)
+    d['photos'] = await get_memory_photos(d['id'])
+    return d
+
+
+async def update_memorywall(memory_id: int, content, title, importance, event_date, mw_meta):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE memories
+            SET content = $2, title = $3, importance = $4,
+                event_date = $5::text::date, mw_meta = $6::jsonb
+            WHERE id = $1 AND mw_meta IS NOT NULL
+            """,
+            memory_id, content, (title or None), importance,
+            (str(event_date)[:10] if event_date else None),
+            json.dumps(mw_meta, ensure_ascii=False),
+        )
+    if MEMORY_VECTOR_ENABLED:
+        try:
+            emb = await compute_embedding(content)
+            if emb:
+                pool2 = await get_pool()
+                async with pool2.acquire() as c2:
+                    await save_memory_embedding(c2, memory_id, emb)
+        except Exception as e:
+            print(f"⚠️ 回忆 {memory_id} embedding更新失败: {e}")
+
+
+async def set_memory_active(memory_id: int, active: bool):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE memories SET is_active = $2 WHERE id = $1", memory_id, active)
+
+
 async def search_memories(query: str, limit: int = 10):
     """
     搜索相关记忆
