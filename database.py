@@ -245,7 +245,21 @@ async def init_tables():
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_memory_photos_memory ON memory_photos (memory_id);
         """)
-        
+
+        # 人设建议（A4）：提取识别出的"行为/相处偏好"不进记忆池，收集到这里供主理人贴 persona
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS persona_suggestions (
+                id             SERIAL PRIMARY KEY,
+                content        TEXT NOT NULL,
+                source_session TEXT,
+                status         TEXT DEFAULT 'pending',
+                created_at     TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_persona_suggestions_status ON persona_suggestions (status, created_at DESC);
+        """)
+
         # 尝试启用pgvector扩展（向量搜索）
         try:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -830,6 +844,41 @@ async def set_memory_active(memory_id: int, active: bool):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("UPDATE memories SET is_active = $2 WHERE id = $1", memory_id, active)
+
+
+# ---- 人设建议（A4）：行为/相处偏好的收集，供主理人贴 persona ----
+
+async def save_persona_suggestion(content: str, source_session: str = ""):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 去重：同内容且还在 pending 的不重复收集
+        existing = await conn.fetchrow(
+            "SELECT id FROM persona_suggestions WHERE content = $1 AND status = 'pending' LIMIT 1",
+            content,
+        )
+        if existing:
+            return existing['id']
+        row = await conn.fetchrow(
+            "INSERT INTO persona_suggestions (content, source_session) VALUES ($1, $2) RETURNING id",
+            content, source_session,
+        )
+        return row['id']
+
+
+async def list_persona_suggestions(status: str = "pending"):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if status == "all":
+            rows = await conn.fetch("SELECT id, content, source_session, status, created_at FROM persona_suggestions ORDER BY created_at DESC")
+        else:
+            rows = await conn.fetch("SELECT id, content, source_session, status, created_at FROM persona_suggestions WHERE status = $1 ORDER BY created_at DESC", status)
+        return [dict(r) for r in rows]
+
+
+async def update_persona_suggestion(sug_id: int, status: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE persona_suggestions SET status = $2 WHERE id = $1", sug_id, status)
 
 
 async def search_memories(query: str, limit: int = 10):

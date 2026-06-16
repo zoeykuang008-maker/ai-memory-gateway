@@ -26,50 +26,44 @@ def get_memory_api_key() -> str:
     return MEMORY_API_KEY or API_KEY
 
 
-EXTRACTION_PROMPT = """你是信息提取专家，负责从对话中识别并提取值得长期记住的关键信息。
+EXTRACTION_PROMPT = """你是记忆提取专家。从对话中提取值得长期记住的信息，并做好「中性化、分类、冲突处理」三件事。
 
-# 提取重点
-- 关键信息：提取用户的重要信息和值得回忆的生活细节
-- 重要事件：记忆深刻的互动，需包含人物、时间、地点（如有）
+# 铁则一：只存中性客观事实，不存评判与命令
+- ✅ 中性事实："阮阮今天喝了冰咖啡"、"阮阮例假从6月14日开始"、"EVE止痛药含布洛芬成分"
+- ❌ 评判/意见/情绪定性："冰咖啡不好"、"她不该熬夜"、"这样很危险" —— 去掉评判，只留客观事实；改不成就不提取
+- ❌ 命令/指令/建议："要求她贴暖宝宝"、"应该多喝热水"、"让她早点睡" —— 这些不是事实，按下面铁则二归类或丢弃
+- 带评判或情绪色彩的句子，先改写成中性事实再存
 
-# 提取范围
-- 个人：年龄、生日、职业、学历、居住地
-- 偏好：明确表达的喜好或厌恶
-- 健康：身体状况、过敏史、饮食禁忌
-- 事件：与AI的重要互动、约定、里程碑
-- 关系：家人、朋友、重要同事
-- 价值观：表达的信念或长期目标
-- 情感：重要的情感时刻或关系里程碑
-- 生活：用户当天的活动、饮食、出行、日常经历等生活细节
+# 铁则二：分类 kind —— 把「事实」和「行为偏好」分开
+- kind="fact"：关于用户/世界的客观信息（身份、健康、事件、关系、生活细节、约定、物品）
+- kind="persona"：关于「该怎么对待用户 / 沟通风格 / 相处偏好」的信息
+  例："不要催她睡觉"、"她喜欢被叫宝贝"、"回复别太长"、"她敏感、不喜欢被赶"、"她要的是陪伴不是说教"
+  这类**不进记忆池**，单独收集给主理人贴到人设里。
+
+# 铁则三：冲突处理 replaces_id —— 新事实推翻旧事实时，标出旧条目
+- 下面「已知信息」每条都带 [id=N]
+- 若新事实是对某条已知信息的**更正/更新/推翻**（例：已知 [id=4] "EVE可以空腹吃"，对话确认"EVE不能空腹吃"），
+  在新条目里写 "replaces_id": 4（用那条旧信息的 id）
+- 只在确实矛盾或更新时填；普通新增填 null
 
 # 不要提取
-- 日常寒暄（"你好""在吗"）
-- AI助手自己的回复内容
-- 关于记忆系统本身的讨论（"某条记忆没有被记录""记忆遗漏""没有被提取"等）
-- 技术调试、bug修复的过程性讨论（除非涉及用户技能或项目里程碑）
-- AI的思考过程、思维链内容
+- 日常寒暄、AI自己的回复内容、AI的思维链
+- 关于记忆系统/检索/技术调试/bug/部署的讨论
 
-# 已知信息处理【最重要】
+# 已知信息（每条带 id，用于去重与冲突判断）
 <已知信息>
 {existing_memories}
 </已知信息>
+- 与已知信息相同或语义重复的，忽略
+- 仅提取「完全新增」或「对已知信息的更正/补充」
+- 没有可提取的新信息就返回空数组 []
 
-- 新信息必须与已知信息逐条比对
-- 相同、相似或语义重复的信息必须忽略（例如已知"用户去妈妈家吃团年饭"，就不要再提取"用户春节去了妈妈家"）
-- 已知信息的补充或更新可以提取（例如已知"用户养了一只猫"，新信息"猫最近生病了"可以提取）
-- 与已知信息矛盾的新信息可以提取（标注为更新）
-- 仅提取完全新增且不与已知信息重复的内容
-- 如果对话中没有任何新信息，返回空数组 []
-
-# 输出格式
-请用以下 JSON 格式返回（不要包含其他内容）：
+# 输出格式（只返回 JSON 数组，不要其他文字）
 [
-  {{"content": "记忆内容", "importance": 分数}},
-  {{"content": "记忆内容", "importance": 分数}}
+  {{"kind": "fact", "content": "中性客观事实", "importance": 分数, "replaces_id": null}},
+  {{"kind": "persona", "content": "行为/相处偏好", "importance": 分数}}
 ]
-
-importance 分数 1-10，10 最重要。
-如果没有值得记住的新信息，返回空数组：[]
+importance 为 1-10（10最重要）。没有可提取的就返回 []。
 """
 
 
@@ -104,9 +98,15 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
     if not conversation_text.strip():
         return []
 
-    # 格式化已有记忆
+    # 格式化已有记忆（带 id，供冲突处理 replaces_id 引用）
     if existing_memories:
-        memories_text = "\n".join(f"- {m}" for m in existing_memories)
+        _lines = []
+        for m in existing_memories:
+            if isinstance(m, dict):
+                _lines.append(f"[id={m.get('id')}] {m.get('content')}")
+            else:
+                _lines.append(f"- {m}")
+        memories_text = "\n".join(_lines)
     else:
         memories_text = "（暂无已知信息）"
 
@@ -175,16 +175,28 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
             if not isinstance(memories, list):
                 return []
 
-            # 验证格式
+            # 验证格式（保留 kind 分类 + replaces_id 冲突标记）
             valid_memories = []
             for mem in memories:
                 if isinstance(mem, dict) and "content" in mem:
-                    valid_memories.append({
+                    kind = mem.get("kind", "fact")
+                    if kind not in ("fact", "persona"):
+                        kind = "fact"
+                    item = {
                         "content": str(mem["content"]),
                         "importance": int(mem.get("importance", 5)),
-                    })
+                        "kind": kind,
+                    }
+                    rid = mem.get("replaces_id")
+                    if isinstance(rid, bool):
+                        rid = None
+                    elif isinstance(rid, int):
+                        item["replaces_id"] = rid
+                    elif isinstance(rid, str) and rid.strip().isdigit():
+                        item["replaces_id"] = int(rid.strip())
+                    valid_memories.append(item)
 
-            print(f"📝 从对话中提取了 {len(valid_memories)} 条新记忆（已对比 {len(existing_memories or [])} 条已有记忆）")
+            print(f"📝 从对话中提取了 {len(valid_memories)} 条（已对比 {len(existing_memories or [])} 条已有记忆）")
             return valid_memories
 
     except json.JSONDecodeError as e:

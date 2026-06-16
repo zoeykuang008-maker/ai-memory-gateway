@@ -28,6 +28,7 @@ from fastapi.templating import Jinja2Templates
 from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
 from database import save_migrated_memory, find_memory_by_mw_id, save_photo, link_photo_to_memory, get_photo, memory_photo_count, delete_memory_photos, get_mw_meta, update_mw_meta
 from database import list_memorywall, get_memorywall_one, update_memorywall, get_memory_photos, set_memory_active
+from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories
 
@@ -873,9 +874,9 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         if MEMORY_EXTRACT_INTERVAL > 1:
             print(f"📝 轮次 {_round_counter}，执行记忆提取")
         
-        # 3. 获取已有记忆，传给提取模型做对比去重
+        # 3. 获取已有记忆（带 id），传给提取模型做对比去重 + 冲突标注(replaces_id)
         existing = await get_recent_memories(limit=40)
-        existing_contents = [r["content"] for r in existing]
+        existing_contents = [{"id": r["id"], "content": r["content"]} for r in existing]
         
         # 4. 构建用于提取的消息列表
         #    截取最近 MEMORY_EXTRACT_INTERVAL 轮对话（每轮=user+assistant共2条）
@@ -915,8 +916,20 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         
         saved = 0
         skipped_dup = 0
+        persona_routed = 0
+        superseded = 0
         for mem in filtered_memories:
-            # DB 层去重门：避免每轮把同一事实反复重写入库（软去重靠不住，根因在此）
+            # A4 提取路由：行为/相处偏好不进记忆池，收集到 persona_suggestions 供主理人贴人设
+            if mem.get("kind") == "persona":
+                try:
+                    await save_persona_suggestion(mem["content"], session_id)
+                    persona_routed += 1
+                    print(f"🎭 行为偏好→人设建议（不入记忆池）: {mem['content'][:50]}...")
+                except Exception as pe:
+                    print(f"⚠️ 人设建议保存失败: {pe}")
+                continue
+
+            # DB 层去重门：避免每轮把同一事实反复重写入库
             try:
                 dup = await check_duplicate_memory(mem["content"])
             except Exception as de:
@@ -932,10 +945,20 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 source_session=session_id,
             )
             saved += 1
+            # A2 冲突处理：新事实推翻旧事实 → 把被推翻的旧条目置 inactive（不再并存打架）
+            rid = mem.get("replaces_id")
+            if rid:
+                try:
+                    await set_memory_active(int(rid), False)
+                    superseded += 1
+                    print(f"♻️ 新事实推翻旧记忆 #{rid}，已置 inactive: {mem['content'][:40]}...")
+                except Exception as ce:
+                    print(f"⚠️ 置旧记忆 inactive 失败 (#{rid}): {ce}")
 
-        if saved or skipped_dup:
+        if saved or skipped_dup or persona_routed or superseded:
             total = await get_all_memories_count()
-            print(f"💾 已保存 {saved} 条新记忆（去重跳过 {skipped_dup} 条，meta过滤 {len(new_memories) - len(filtered_memories)} 条），总计 {total} 条")
+            print(f"💾 已存 {saved} 条事实（去重跳过 {skipped_dup}，meta过滤 {len(new_memories) - len(filtered_memories)}，"
+                  f"行为偏好分流 {persona_routed}，推翻旧事实 {superseded}），总计 {total} 条")
             
     except Exception as e:
         print(f"⚠️  后台记忆处理失败: {e}")
@@ -2071,6 +2094,37 @@ async def api_mw_delete_photo(mid: int, pid: int):
         mm["photos"] = [p for p in (mm.get("photos") or []) if p.get("photo_id") != pid]
         await update_mw_meta(mid, mm)
     return {"status": "ok"}
+
+
+# ---- 人设建议（A4）：提取分流出来的"行为/相处偏好"，供主理人审阅后贴进 persona ----
+
+@app.get("/api/persona-suggestions")
+async def api_list_persona_suggestions(status: str = "pending"):
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    items = await list_persona_suggestions(status)
+    out = []
+    for it in items:
+        d = dict(it)
+        if d.get("created_at"):
+            d["created_at"] = str(d["created_at"])
+        out.append(d)
+    return {"items": out, "total": len(out)}
+
+
+@app.post("/api/persona-suggestions/{sug_id}")
+async def api_update_persona_suggestion(sug_id: int, request: Request):
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    status = body.get("status", "dismissed")
+    if status not in ("pending", "applied", "dismissed"):
+        return JSONResponse(status_code=400, content={"error": "status 必须是 pending/applied/dismissed"})
+    await update_persona_suggestion(sug_id, status)
+    return {"status": "ok", "id": sug_id, "new_status": status}
 
 
 @app.post("/api/memories/{memory_id}/promote")
