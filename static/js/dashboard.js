@@ -2352,6 +2352,57 @@ function copyPs(id) {
     } else { fallbackCopy(txt, id); }
 }
 
+// AI 整合去重：把当前筛选(默认 pending)的人设建议用 haiku 合并成一段可贴 persona 的文本
+async function consolidatePersona() {
+    const status = (document.getElementById('psStatus') || {}).value || 'pending';
+    if (!_psCache.length) { alert('当前没有可整合的人设建议'); return; }
+    const btn = document.getElementById('psConsolidateBtn');
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '整合中…'; }
+    try {
+        const res = await fetch('/api/persona-suggestions/consolidate', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status })
+        }).then(r => r.json());
+        if (res.error) { alert('整合失败：' + res.error); return; }
+        showConsolidateModal(res.consolidated || '', res.count || 0);
+    } catch (e) { alert('整合失败：' + e.message); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = orig || '🧩 AI整合去重'; } }
+}
+
+function showConsolidateModal(text, count) {
+    const old = document.getElementById('psConsolidateOverlay');
+    if (old) old.remove();
+    const ov = document.createElement('div');
+    ov.id = 'psConsolidateOverlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:9999;padding:24px';
+    ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+    const box = document.createElement('div');
+    box.style.cssText = 'background:var(--card-bg,#1e1e2e);color:var(--text,#eaeaea);max-width:760px;width:100%;max-height:82vh;display:flex;flex-direction:column;border-radius:12px;padding:18px;box-shadow:0 12px 40px rgba(0,0,0,.45)';
+    const head = document.createElement('div');
+    head.style.cssText = 'font-weight:600;margin-bottom:10px';
+    head.textContent = '🧩 整合去重结果（合并 ' + count + ' 条 → 可直接贴进 persona，可在框内再改）';
+    const ta = document.createElement('textarea');
+    ta.id = 'psConsolidateText'; ta.value = text; ta.spellcheck = false;
+    ta.style.cssText = 'flex:1;min-height:320px;width:100%;box-sizing:border-box;resize:vertical;font:13px/1.6 monospace;padding:12px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:rgba(0,0,0,.25);color:inherit';
+    const foot = document.createElement('div');
+    foot.style.cssText = 'margin-top:12px;display:flex;gap:8px;justify-content:flex-end';
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'btn'; copyBtn.textContent = '复制全部';
+    copyBtn.onclick = function () {
+        ta.select();
+        const done = () => { copyBtn.textContent = '已复制 ✓'; setTimeout(() => { copyBtn.textContent = '复制全部'; }, 1000); };
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(ta.value).then(done).catch(done);
+        else { try { document.execCommand('copy'); } catch (e) {} done(); }
+    };
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'btn'; closeBtn.textContent = '关闭';
+    closeBtn.onclick = function () { ov.remove(); };
+    foot.appendChild(copyBtn); foot.appendChild(closeBtn);
+    box.appendChild(head); box.appendChild(ta); box.appendChild(foot);
+    ov.appendChild(box); document.body.appendChild(ov); ta.focus();
+}
+
 function showCopied(id) {
     const el = document.querySelector(`.ps-item[data-id="${id}"] .ps-body`);
     if (el) { el.classList.add('ps-copied'); setTimeout(() => el.classList.remove('ps-copied'), 800); }

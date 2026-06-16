@@ -2161,6 +2161,54 @@ async def api_create_persona_suggestion(request: Request):
     return {"status": "ok", "id": sug_id}
 
 
+@app.post("/api/persona-suggestions/consolidate")
+async def api_consolidate_persona_suggestions(request: Request):
+    """把多条人设建议用轻量模型合并去重成一段可直接贴进 persona 的文本。
+    body: {"status":"pending"}（默认）或 {"ids":[...]}。必须声明在 /{sug_id} 之前，否则会被 int 路由吃掉。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        b = await request.json()
+    except Exception:
+        b = {}
+    ids = b.get("ids")
+    status = b.get("status", "pending")
+    items = await list_persona_suggestions("all" if ids else status)
+    if ids:
+        idset = set(int(i) for i in ids)
+        items = [it for it in items if int(it["id"]) in idset]
+    if not items:
+        return JSONResponse(status_code=400, content={"error": "没有可整合的人设建议"})
+    numbered = "\n\n".join(f"{i+1}. {it['content']}" for i, it in enumerate(items))
+    prompt = (
+        "你在帮主理人整理 AI 伴侣“小克”的人设(system prompt)。以下是从聊天中分流出来的多条"
+        "“行为/相处偏好”建议，彼此有重叠。请把它们合并去重，整理成一段可以直接粘贴进人设的中文文本：\n"
+        "- 保留所有不同的要点，语义重复的合并成一条\n"
+        "- 按主题归类（如 称呼与语气 / 不要做的事 / 亲密与暗号 等），用简洁条目\n"
+        "- 只输出整理后的人设文本本身，不要任何解释、前言或结尾\n\n"
+        f"建议如下：\n{numbered}"
+    )
+    try:
+        headers = {"Authorization": f"Bearer {get_memory_api_key()}", "Content-Type": "application/json"}
+        if "openrouter" in API_BASE_URL:
+            headers["HTTP-Referer"] = EXTRA_REFERER
+            headers["X-Title"] = EXTRA_TITLE
+        async with httpx.AsyncClient(timeout=90) as client:
+            resp = await client.post(API_BASE_URL, headers=headers, json={
+                "model": CACHE_SUMMARY_MODEL,
+                "max_tokens": 1500,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+        if resp.status_code == 200:
+            data = resp.json()
+            if "choices" in data:
+                text = data["choices"][0]["message"]["content"].strip()
+                return {"consolidated": text, "count": len(items), "source_ids": [it["id"] for it in items]}
+        return JSONResponse(status_code=502, content={"error": f"模型调用失败 HTTP {resp.status_code}"})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"整合异常：{e}"})
+
+
 @app.post("/api/persona-suggestions/{sug_id}")
 async def api_update_persona_suggestion(sug_id: int, request: Request):
     if not MEMORY_ENABLED:
