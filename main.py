@@ -2143,6 +2143,24 @@ async def api_list_persona_suggestions(status: str = "pending"):
     return {"items": out, "total": len(out)}
 
 
+@app.post("/api/persona-suggestions")
+async def api_create_persona_suggestion(request: Request):
+    """手动创建一条人设建议（B 交接分拣用：把人设类记忆转成建议，供主理人审阅后贴进 persona）。
+    body: {"content": "...", "source_session": "可选来源标签"}"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    content = (body.get("content") or "").strip()
+    if not content:
+        return JSONResponse(status_code=400, content={"error": "content 不能为空"})
+    source_session = (body.get("source_session") or "")
+    sug_id = await save_persona_suggestion(content, source_session)
+    return {"status": "ok", "id": sug_id}
+
+
 @app.post("/api/persona-suggestions/{sug_id}")
 async def api_update_persona_suggestion(sug_id: int, request: Request):
     if not MEMORY_ENABLED:
