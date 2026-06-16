@@ -1976,8 +1976,9 @@ async def api_mw_create(request: Request):
         one = await get_memorywall_one(mid)
         return {"status": "ok", "item": _mw_item(one) if one else {"id": mid}}
     except Exception as ex:
-        import traceback as _tb
-        return JSONResponse(status_code=500, content={"error": str(ex), "type": type(ex).__name__, "trace": _tb.format_exc().splitlines()[-8:]})
+        # 优雅兜底：例如客户端发了非 UTF-8 的请求体（request.json() 解码失败）等
+        print(f"⚠️ 回忆创建失败: {ex}")
+        return JSONResponse(status_code=400, content={"error": f"创建失败：{ex}"})
 
 
 @app.put("/api/memorywall/{mid}")
