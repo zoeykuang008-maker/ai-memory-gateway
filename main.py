@@ -1946,34 +1946,38 @@ async def api_mw_list(author: str = "", mood: str = "", include_inactive: bool =
 async def api_mw_create(request: Request):
     if not MEMORY_ENABLED:
         return {"error": "记忆系统未启用"}
-    b = await request.json()
-    title = (b.get("title") or "").strip()
-    body = (b.get("body") or b.get("content") or "").strip()
-    if not title and not body:
-        return JSONResponse(status_code=400, content={"error": "标题和正文不能都为空"})
-    author = b.get("author") or None
-    mood = b.get("mood") or None
-    source = b.get("source") or "manual"
-    is_period = 1 if b.get("is_period_day") else 0
-    location = b.get("location") or None
-    created_at = b.get("date") or datetime.now(timezone.utc).isoformat()
-    summary = ""
-    if len(body) > MW_SUMMARY_THRESHOLD:
-        try:
-            summary = await generate_summary([{"role": "user", "content": f"{title}\n{body}"}])
-        except Exception as se:
-            print(f"⚠️ 回忆摘要生成失败: {se}")
-    content = _compose_mw_content(title, body, author, mood, created_at, summary)
-    importance = 9 if mood == "纪念" else 8
-    mw_meta = {"original_id": f"dash-{int(datetime.now().timestamp()*1000)}",
-               "date": created_at, "author": author,
-               "author_cn": MW_AUTHOR_CN.get(author, author or ""),
-               "mood": mood, "source": source, "is_period_day": is_period,
-               "location": location, "title": title, "body": body, "photos": []}
-    mid = await save_migrated_memory(content=content, importance=importance, title=title,
-                                     event_date=created_at, created_at=created_at, mw_meta=mw_meta)
-    one = await get_memorywall_one(mid)
-    return {"status": "ok", "item": _mw_item(one) if one else {"id": mid}}
+    try:
+        b = await request.json()
+        title = (b.get("title") or "").strip()
+        body = (b.get("body") or b.get("content") or "").strip()
+        if not title and not body:
+            return JSONResponse(status_code=400, content={"error": "标题和正文不能都为空"})
+        author = b.get("author") or None
+        mood = b.get("mood") or None
+        source = b.get("source") or "manual"
+        is_period = 1 if b.get("is_period_day") else 0
+        location = b.get("location") or None
+        created_at = b.get("date") or datetime.now(timezone.utc).isoformat()
+        summary = ""
+        if len(body) > MW_SUMMARY_THRESHOLD:
+            try:
+                summary = await generate_summary([{"role": "user", "content": f"{title}\n{body}"}])
+            except Exception as se:
+                print(f"⚠️ 回忆摘要生成失败: {se}")
+        content = _compose_mw_content(title, body, author, mood, created_at, summary)
+        importance = 9 if mood == "纪念" else 8
+        mw_meta = {"original_id": f"dash-{int(datetime.now().timestamp()*1000)}",
+                   "date": created_at, "author": author,
+                   "author_cn": MW_AUTHOR_CN.get(author, author or ""),
+                   "mood": mood, "source": source, "is_period_day": is_period,
+                   "location": location, "title": title, "body": body, "photos": []}
+        mid = await save_migrated_memory(content=content, importance=importance, title=title,
+                                         event_date=created_at, created_at=created_at, mw_meta=mw_meta)
+        one = await get_memorywall_one(mid)
+        return {"status": "ok", "item": _mw_item(one) if one else {"id": mid}}
+    except Exception as ex:
+        import traceback as _tb
+        return JSONResponse(status_code=500, content={"error": str(ex), "type": type(ex).__name__, "trace": _tb.format_exc().splitlines()[-8:]})
 
 
 @app.put("/api/memorywall/{mid}")
