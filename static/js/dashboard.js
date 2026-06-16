@@ -120,6 +120,9 @@ function switchSection(name) {
     if (name === 'memorywall') {
         loadMemoryWall();
     }
+    if (name === 'persona') {
+        loadPersonaSuggestions();
+    }
 }
 
 // ============================================
@@ -2284,4 +2287,79 @@ async function removeMwPhoto(mid, pid) {
     if (!confirm('删除这张照片？')) return;
     try { await fetch('/api/memorywall/' + mid + '/photos/' + pid, { method: 'DELETE' }); await loadMemoryWall(); editMw(mid); }
     catch (e) { alert('删除失败：' + e.message); }
+}
+
+// ============================================
+// 人设建议（A4）：提取分流出来的行为/相处偏好，审阅后贴进 persona
+// ============================================
+let _psCache = [];
+const PS_STATUS_CN = { pending: '待处理', applied: '已贴', dismissed: '已忽略' };
+
+async function loadPersonaSuggestions() {
+    const list = document.getElementById('psList');
+    if (!list) return;
+    const status = (document.getElementById('psStatus') || {}).value || 'pending';
+    list.innerHTML = '<div class="ps-empty">加载中…</div>';
+    try {
+        const data = await fetch('/api/persona-suggestions?status=' + encodeURIComponent(status)).then(r => r.json());
+        _psCache = data.items || [];
+        const cnt = document.getElementById('psCount');
+        if (cnt) cnt.textContent = _psCache.length ? `共 ${_psCache.length} 条` : '';
+        if (!_psCache.length) {
+            list.innerHTML = '<div class="ps-empty">' + (status === 'pending' ? '没有待处理的人设建议～提取到行为偏好会出现在这里' : '没有内容') + '</div>';
+            return;
+        }
+        list.innerHTML = _psCache.map(renderPsItem).join('');
+    } catch (e) {
+        list.innerHTML = '<div class="ps-empty">加载失败：' + escapeHtml(String(e)) + '</div>';
+    }
+}
+
+function renderPsItem(it) {
+    const date = (it.created_at || '').slice(0, 16);
+    const badge = PS_STATUS_CN[it.status] || it.status;
+    return `
+    <div class="ps-item" data-id="${it.id}">
+        <div class="ps-body">${escapeHtml(it.content || '')}</div>
+        <div class="ps-row">
+            <span class="ps-badge ${it.status}">${badge}</span>
+            <span class="ps-date">${escapeHtml(date)}</span>
+            <span class="ps-actions">
+                <button class="btn btn-sm" onclick="copyPs(${it.id})">复制</button>
+                ${it.status !== 'applied' ? `<button class="btn btn-sm" onclick="psSet(${it.id},'applied')">✓ 已贴</button>` : ''}
+                ${it.status !== 'dismissed' ? `<button class="btn btn-sm ps-danger" onclick="psSet(${it.id},'dismissed')">忽略</button>` : ''}
+                ${it.status !== 'pending' ? `<button class="btn btn-sm" onclick="psSet(${it.id},'pending')">↩ 复原</button>` : ''}
+            </span>
+        </div>
+    </div>`;
+}
+
+async function psSet(id, status) {
+    try {
+        await fetch('/api/persona-suggestions/' + id, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status })
+        });
+        loadPersonaSuggestions();
+    } catch (e) { alert('操作失败：' + e.message); }
+}
+
+function copyPs(id) {
+    const it = (_psCache || []).find(x => x.id === id);
+    if (!it) return;
+    const txt = it.content || '';
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(() => showCopied(id)).catch(() => fallbackCopy(txt, id));
+    } else { fallbackCopy(txt, id); }
+}
+
+function showCopied(id) {
+    const el = document.querySelector(`.ps-item[data-id="${id}"] .ps-body`);
+    if (el) { el.classList.add('ps-copied'); setTimeout(() => el.classList.remove('ps-copied'), 800); }
+}
+
+function fallbackCopy(txt, id) {
+    const ta = document.createElement('textarea');
+    ta.value = txt; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); showCopied(id); } catch (e) { alert('复制失败，请手动选择'); }
+    document.body.removeChild(ta);
 }

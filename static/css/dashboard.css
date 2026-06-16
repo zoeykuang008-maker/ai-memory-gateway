@@ -1347,3 +1347,21 @@ body {
 .mw-pe img { width:64px; height:64px; object-fit:cover; border-radius:var(--radius-xs); border:1px solid var(--border-light); }
 .mw-pe button { position:absolute; top:-6px; right:-6px; width:20px; height:20px; border-radius:50%; border:none; background:var(--danger); color:#fff; cursor:pointer; font-size:12px; line-height:1; }
 .mw-modal-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
+
+/* ===== 人设建议面板 ===== */
+.ps-toolbar { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+.ps-count { font-size:13px; color:var(--text-muted); }
+.ps-list { display:flex; flex-direction:column; gap:10px; }
+.ps-empty { text-align:center; color:var(--text-muted); padding:36px 0; font-size:14px; }
+.ps-item { background:var(--card); border:1px solid var(--border-light); border-left:3px solid var(--primary); border-radius:var(--radius-sm); padding:14px 16px; box-shadow:var(--shadow-sm); }
+.ps-body { font-size:14px; color:var(--text); line-height:1.6; transition:background .3s; border-radius:var(--radius-xs); }
+.ps-body.ps-copied { background:#fef3e2; }
+.ps-row { display:flex; align-items:center; gap:8px; margin-top:10px; }
+.ps-badge { font-size:11px; padding:2px 8px; border-radius:10px; }
+.ps-badge.pending { background:#fef3e2; color:#b4690e; }
+.ps-badge.applied { background:var(--success-bg); color:var(--success); }
+.ps-badge.dismissed { background:var(--border-light); color:var(--text-muted); }
+.ps-date { font-size:11px; color:var(--text-muted); }
+.ps-actions { margin-left:auto; display:flex; gap:6px; }
+.ps-danger { color:var(--danger); }
+.ps-danger:hover { background:var(--danger-bg); border-color:var(--danger); }

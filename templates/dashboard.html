@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Memory Gateway</title>
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=3.7-mw">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=3.9-ps">
 </head>
 <body>
     <div class="dashboard">
@@ -22,6 +22,10 @@
                 <a href="#" class="nav-item" data-section="memorywall">
                     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg></span>
                     <span class="nav-label">回忆墙</span>
+                </a>
+                <a href="#" class="nav-item" data-section="persona">
+                    <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
+                    <span class="nav-label">人设建议</span>
                 </a>
                 <a href="#" class="nav-item" data-section="import">
                     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg></span>
@@ -110,6 +114,26 @@
                     </div>
                 </div>
             </div>
+
+            <!-- 人设建议 Section -->
+            <section id="section-persona" class="section">
+                <div class="section-header">
+                    <h1>🎭 人设建议</h1>
+                    <p class="section-desc">提取分流出来的"行为/相处偏好"，审阅后贴进 persona（不进记忆池）</p>
+                </div>
+                <div class="card">
+                    <div class="ps-toolbar">
+                        <select id="psStatus" class="select-input" onchange="loadPersonaSuggestions()">
+                            <option value="pending">待处理</option>
+                            <option value="applied">已贴</option>
+                            <option value="dismissed">已忽略</option>
+                            <option value="all">全部</option>
+                        </select>
+                        <span id="psCount" class="ps-count"></span>
+                    </div>
+                    <div id="psList" class="ps-list"><div class="ps-empty">加载中…</div></div>
+                </div>
+            </section>
 
             <!-- 记忆管理 Section -->
             <section id="section-manage" class="section active">
@@ -671,6 +695,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.8-mw"></script>
+    <script src="/static/js/dashboard.js?v=3.9-ps"></script>
 </body>
 </html>
