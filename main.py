@@ -353,17 +353,18 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
     1. 用用户消息搜索相关记忆
     2. 格式化成文本拼接到人设后面
     """
+    persona = await get_system_prompt()  # A修复：人设取 DB（dashboard 可改、即时生效），不再用 system_prompt.txt 占位
     if not MEMORY_ENABLED or not MEMORY_EXTRACT_ENABLED:
-        return SYSTEM_PROMPT
-    
+        return persona
+
     if MAX_MEMORIES_INJECT <= 0:
-        return SYSTEM_PROMPT
-    
+        return persona
+
     try:
         memories = await search_memories(user_message, limit=MAX_MEMORIES_INJECT)
-        
+
         if not memories:
-            return SYSTEM_PROMPT
+            return persona
         
         # 格式化记忆文本（带日期，帮助模型判断新旧）
         memory_lines = []
@@ -380,7 +381,7 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
             memory_lines.append(f"- {date_str}{mem['content']}")
         memory_text = "\n".join(memory_lines)
         
-        enhanced_prompt = f"""{SYSTEM_PROMPT}
+        enhanced_prompt = f"""{persona}
 
 【从过往对话中检索到的相关记忆】
 {memory_text}
@@ -406,7 +407,7 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
         
     except Exception as e:
         print(f"⚠️  记忆检索失败: {e}，使用纯人设")
-        return SYSTEM_PROMPT
+        return persona
 
 
 # ============================================================
@@ -1198,7 +1199,7 @@ async def chat_completions(request: Request):
         
         _up_block = _compose_user_profile_block(await get_user_profile())
         messages = await build_partitioned_messages(
-            session_id, all_msgs, SYSTEM_PROMPT + _up_block, user_message
+            session_id, all_msgs, (await get_system_prompt()) + _up_block, user_message
         )
         body["messages"] = messages
     
@@ -1209,7 +1210,7 @@ async def chat_completions(request: Request):
             if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
                 enhanced_prompt = await build_system_prompt_with_memories(user_message)
             else:
-                enhanced_prompt = SYSTEM_PROMPT
+                enhanced_prompt = await get_system_prompt()
             enhanced_prompt = (enhanced_prompt or "") + _up_block
             if enhanced_prompt:
                 has_system = any(msg.get("role") == "system" for msg in messages)
@@ -2261,6 +2262,7 @@ async def api_debug_built_prompt(request: Request):
     up = await get_user_profile()
     up_block = _compose_user_profile_block(up)
     hdr = "# 关于阮阮（对话对象）"
+    persona = await get_system_prompt()  # A修复后：人设源 = DB（与聊天路径一致）
 
     def _sys_text(messages):
         for m in messages:
@@ -2273,10 +2275,10 @@ async def api_debug_built_prompt(request: Request):
         return "", None
 
     def _assert(sys_text):
-        persona_head = (SYSTEM_PROMPT or "")[:40]
+        persona_head = (persona or "")[:40]
         return {
             "system_total_len": len(sys_text),
-            "persona_present": bool(SYSTEM_PROMPT) and (persona_head in sys_text),
+            "persona_present": bool(persona) and (persona_head in sys_text),
             "user_profile_block_present": (hdr in sys_text) if up_block else False,
             "user_profile_header_index": sys_text.find(hdr),
             "system_head_700": sys_text[:700],
@@ -2286,15 +2288,16 @@ async def api_debug_built_prompt(request: Request):
         "live_mode": "partition_cache" if CACHE_PARTITION_ENABLED else "non_cache",
         "CACHE_PARTITION_ENABLED": CACHE_PARTITION_ENABLED,
         "forward_note": "两路组装的结果都会被赋给 body['messages'] 后原样转发上游(main.py 1168/1188)。",
-        "persona_source": "system_prompt.txt",
-        "system_prompt_len": len(SYSTEM_PROMPT or ""),
+        "persona_source": "DB gateway_config[systemPrompt] (get_system_prompt)",
+        "system_prompt_len": len(persona or ""),
+        "file_placeholder_len": len(SYSTEM_PROMPT or ""),
         "user_profile_set": bool(up and up.strip()),
         "user_profile_len": len(up or ""),
         "user_profile_block_rendered": up_block,
         "sample_message": sample,
     }
     try:
-        part_msgs = await _build_basic_cached([], SYSTEM_PROMPT + up_block, sample, {"role": "user", "content": sample})
+        part_msgs = await _build_basic_cached([], persona + up_block, sample, {"role": "user", "content": sample})
         ptxt, psys = _sys_text(part_msgs)
         last = part_msgs[-1]["content"] if part_msgs else ""
         out["partition_cache_mode"] = {
@@ -2307,7 +2310,7 @@ async def api_debug_built_prompt(request: Request):
     except Exception as e:
         out["partition_cache_mode"] = {"error": str(e)}
     try:
-        enhanced = await build_system_prompt_with_memories(sample) if (MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED) else SYSTEM_PROMPT
+        enhanced = await build_system_prompt_with_memories(sample) if (MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED) else (await get_system_prompt())
         enhanced = (enhanced or "") + up_block
         out["non_cache_mode"] = _assert(enhanced)
     except Exception as e:
