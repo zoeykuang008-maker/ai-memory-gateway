@@ -20,7 +20,7 @@ import secrets
 import httpx
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, UploadFile, File
+from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -2023,24 +2023,34 @@ async def api_mw_delete(mid: int, hard: bool = False):
 
 
 @app.post("/api/memorywall/{mid}/photos")
-async def api_mw_upload_photo(mid: int, file: UploadFile = File(...)):
+async def api_mw_upload_photo(mid: int, request: Request):
+    """照片上传：原始字节直接作为 body（不依赖 python-multipart），
+    文件名走 X-Filename 头、类型走 Content-Type。"""
     if not MEMORY_ENABLED:
         return {"error": "记忆系统未启用"}
     existing = await get_memorywall_one(mid)
     if not existing:
         return JSONResponse(status_code=404, content={"error": "回忆不存在"})
-    data = await file.read()
+    data = await request.body()
     if not data:
         return JSONResponse(status_code=400, content={"error": "空文件"})
-    mime = file.content_type or "image/png"
-    pid = await save_photo(mid, file.filename, mime, data)
+    mime = (request.headers.get("content-type") or "image/png").split(";")[0].strip()
+    if not mime.startswith("image/"):
+        mime = "image/png"
+    fname = request.headers.get("x-filename") or "photo"
+    try:
+        from urllib.parse import unquote
+        fname = unquote(fname)
+    except Exception:
+        pass
+    pid = await save_photo(mid, fname, mime, data)
     mm = existing.get("mw_meta") or {}
     photos = mm.get("photos") or []
-    photos.append({"photo_id": pid, "original_name": file.filename, "mime": mime,
+    photos.append({"photo_id": pid, "original_name": fname, "mime": mime,
                    "url": f"/api/photos/{pid}", "bytes": len(data)})
     mm["photos"] = photos
     await update_mw_meta(mid, mm)
-    return {"status": "ok", "photo": {"photo_id": pid, "url": f"/api/photos/{pid}", "original_name": file.filename}}
+    return {"status": "ok", "photo": {"photo_id": pid, "url": f"/api/photos/{pid}", "original_name": fname}}
 
 
 @app.delete("/api/memorywall/{mid}/photos/{pid}")

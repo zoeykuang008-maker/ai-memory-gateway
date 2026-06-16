@@ -2262,8 +2262,11 @@ async function saveMw() {
         }
         const files = f.file.files;
         for (let i = 0; i < files.length; i++) {
-            const fd = new FormData(); fd.append('file', files[i]);
-            await fetch('/api/memorywall/' + mid + '/photos', { method: 'POST', body: fd });
+            await fetch('/api/memorywall/' + mid + '/photos', {
+                method: 'POST',
+                headers: { 'Content-Type': files[i].type || 'image/png', 'X-Filename': encodeURIComponent(files[i].name) },
+                body: files[i]
+            });
         }
         closeMwForm(); loadMemoryWall();
     } catch (e) {
