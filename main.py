@@ -405,14 +405,43 @@ def _strip_cache_control(messages: list):
         print(f"🔧 兼容性处理: 剥离了 {stripped} 个 cache_control 字段（非 Claude 模型）")
 
 
-def build_time_injection() -> str:
-    """构建时间注入文本（东八区）"""
+def _elapsed_hint(now_utc, last_ts) -> str:
+    """A5 轻量时间感知：根据距上一句的间隔，给模型一个'刚发生/过了多久'的概念。"""
+    if not last_ts:
+        return ""
+    try:
+        if isinstance(last_ts, str):
+            last_ts = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.replace(tzinfo=timezone.utc)
+        mins = (now_utc - last_ts).total_seconds() / 60.0
+    except Exception:
+        return ""
+    if mins < 0:
+        return ""
+    if mins < 3:
+        return "距上一句几乎没有时间流逝（你们还在连续对话——别假设对方已经做完了刚才在做的事，比如刚上车就别问到没到家）"
+    if mins < 30:
+        return f"距上一句约 {int(mins)} 分钟"
+    if mins < 120:
+        return f"距上一句约 {int(mins)} 分钟（对方中间可能在忙别的）"
+    if mins < 1440:
+        return f"距上次聊天约 {int(mins / 60)} 小时"
+    return f"距上次聊天约 {int(mins / 1440)} 天"
+
+
+def build_time_injection(last_msg_ts=None) -> str:
+    """构建时间注入文本（东八区）+ A5 轻量时间感知（距上一句多久）"""
     now_utc = datetime.now(timezone.utc)
     now_local = now_utc + timedelta(hours=TIMEZONE_HOURS)
     weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     weekday = weekday_names[now_local.weekday()]
     time_str = now_local.strftime("%Y年%m月%d日 %H:%M")
-    return f"【当前时间】{time_str} {weekday}"
+    base = f"【当前时间】{time_str} {weekday}"
+    rel = _elapsed_hint(now_utc, last_msg_ts)
+    if rel:
+        base += "，" + rel
+    return base
 
 
 async def generate_summary(messages: list, session_id: str = "") -> str:
@@ -674,20 +703,21 @@ async def build_partitioned_messages(
         result.append(m)
     
     if current_user_msg:
-        parts = [build_time_injection()]
-        
+        _last_ts = history[-1].get('created_at') if history else None
+        parts = [build_time_injection(_last_ts)]
+
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
             mem_text = await build_memory_text(user_message)
             if mem_text:
                 parts.append(mem_text)
-        
+
         current_text = current_user_msg['content']
         if isinstance(current_text, list):
             current_text = " ".join(
                 item.get("text", "") for item in current_text
                 if isinstance(item, dict) and item.get("type") == "text"
             )
-        
+
         parts.append(current_text)
         result.append({"role": "user", "content": "\n\n".join(parts)})
     
@@ -724,20 +754,21 @@ async def _build_basic_cached(
         result.append(m)
     
     if current_user_msg:
-        parts = [build_time_injection()]
-        
+        _last_ts = history[-1].get('created_at') if history else None
+        parts = [build_time_injection(_last_ts)]
+
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
             mem_text = await build_memory_text(user_message)
             if mem_text:
                 parts.append(mem_text)
-        
+
         current_text = current_user_msg['content']
         if isinstance(current_text, list):
             current_text = " ".join(
                 item.get("text", "") for item in current_text
                 if isinstance(item, dict) and item.get("type") == "text"
             )
-        
+
         parts.append(current_text)
         result.append({"role": "user", "content": "\n\n".join(parts)})
     
