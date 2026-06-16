@@ -688,6 +688,15 @@
                     </div>
                 </div>
 
+                <!-- 用户档案（关于阮阮，与小克人设分开存/改/注入）-->
+                <div class="card settings-card">
+                    <h3 class="settings-group-title">用户档案 · 关于阮阮（对话对象）</h3>
+                    <div class="settings-field">
+                        <small class="form-hint">独立于 System Prompt 单独存储与注入：注入时作为单独一块、清楚标注 <code># 关于阮阮（对话对象）</code>，不会和小克人设混在一起。留空则不注入。</small>
+                        <textarea id="set-userProfile" class="textarea" rows="12" placeholder="在这里粘贴/编辑阮阮的个人档案（喜好、健康、作息、重要的人和事…）"></textarea>
+                    </div>
+                </div>
+
                 <!-- 保存按钮 -->
                 <div style="text-align:center; padding:24px 0 40px;">
                     <button class="btn btn-primary btn-lg" onclick="saveSettings()" id="save-settings-btn" style="min-width:200px;">保存设置</button>
@@ -696,6 +705,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=3.9-ps"></script>
+    <script src="/static/js/dashboard.js?v=3.10-up"></script>
 </body>
 </html>

@@ -1949,6 +1949,8 @@ async function loadSettings() {
             promptEl.value = s.systemPrompt || '';
             updatePromptCount();
         }
+        const upEl = document.getElementById('set-userProfile');
+        if (upEl) upEl.value = s.userProfile || '';
         // REASONING_EFFORT 下拉
         const reEl = document.getElementById('set-REASONING_EFFORT');
         if (reEl) reEl.value = s.REASONING_EFFORT || '';
@@ -2004,6 +2006,8 @@ async function saveSettings() {
     // 长文本
     const promptEl = document.getElementById('set-systemPrompt');
     if (promptEl) payload.systemPrompt = promptEl.value;
+    const upEl = document.getElementById('set-userProfile');
+    if (upEl) payload.userProfile = upEl.value;
 
     try {
         const resp = await fetch('/api/settings', {

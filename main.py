@@ -162,6 +162,40 @@ def invalidate_system_prompt_cache():
     _cached_system_prompt_loaded = False
 
 
+# ===== 用户档案（关于对话对象阮阮）：与小克人设分开存 / 分开改 / 分开注入 =====
+_cached_user_profile = None
+_cached_user_profile_loaded = False
+
+async def get_user_profile() -> str:
+    """从 gateway_config 读取用户档案（userProfile），独立于 systemPrompt。"""
+    global _cached_user_profile, _cached_user_profile_loaded
+    if _cached_user_profile_loaded:
+        return _cached_user_profile or ""
+    try:
+        _cached_user_profile = await get_gateway_config("userProfile", "")
+        _cached_user_profile_loaded = True
+        return _cached_user_profile or ""
+    except Exception:
+        return _cached_user_profile or ""
+
+def invalidate_user_profile_cache():
+    """清除用户档案缓存（设置面板更新后调用）"""
+    global _cached_user_profile, _cached_user_profile_loaded
+    _cached_user_profile = None
+    _cached_user_profile_loaded = False
+
+def _compose_user_profile_block(profile: str) -> str:
+    """把用户档案包成一个清楚标注、与小克人设完全分开的独立块。空则不注入。"""
+    p = (profile or "").strip()
+    if not p:
+        return ""
+    return ("\n\n========================================\n"
+            "# 关于阮阮（对话对象）\n"
+            "（以下是对话对象阮阮本人的资料，仅供你了解她；这不是你的人设，"
+            "你的人设见上文，二者互不混用。）\n"
+            f"{p}")
+
+
 # ============================================================
 # 应用生命周期管理
 # ============================================================
@@ -1162,19 +1196,21 @@ async def chat_completions(request: Request):
         
         print(f"📦 分区模式: DB历史{len(db_msgs)}条 + 客户端消息{len(client_new_msgs)}条")
         
+        _up_block = _compose_user_profile_block(await get_user_profile())
         messages = await build_partitioned_messages(
-            session_id, all_msgs, SYSTEM_PROMPT, user_message
+            session_id, all_msgs, SYSTEM_PROMPT + _up_block, user_message
         )
         body["messages"] = messages
     
     else:
         # ---------- 原有逻辑：system prompt + 记忆注入 ----------
-        if SYSTEM_PROMPT or (MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message):
+        _up_block = _compose_user_profile_block(await get_user_profile())
+        if SYSTEM_PROMPT or _up_block or (MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message):
             if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
                 enhanced_prompt = await build_system_prompt_with_memories(user_message)
             else:
                 enhanced_prompt = SYSTEM_PROMPT
-            
+            enhanced_prompt = (enhanced_prompt or "") + _up_block
             if enhanced_prompt:
                 has_system = any(msg.get("role") == "system" for msg in messages)
                 if has_system:
@@ -2949,6 +2985,8 @@ async def get_settings():
 
             # System Prompt
             "systemPrompt": db.get("systemPrompt") or _DEFAULT_SYSTEM_PROMPT or "",
+            # 用户档案（关于阮阮，与小克人设分开存/改/注入）
+            "userProfile": db.get("userProfile") or "",
         }
 
         return {"status": "ok", "settings": settings}
@@ -3030,6 +3068,14 @@ async def save_settings(request: Request):
                 invalidate_system_prompt_cache()
                 updated.append("systemPrompt")
                 print(f"[settings] systemPrompt 已更新（{len(str(value))} 字）")
+                continue
+
+            # --- userProfile 特殊处理（关于阮阮，与人设分开）---
+            if key == "userProfile":
+                await set_gateway_config("userProfile", str(value))
+                invalidate_user_profile_cache()
+                updated.append("userProfile")
+                print(f"[settings] userProfile 已更新（{len(str(value))} 字）")
                 continue
 
             # --- 常规字段 ---
