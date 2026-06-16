@@ -2248,6 +2248,73 @@ async def api_consolidate_persona_suggestions(request: Request):
         return JSONResponse(status_code=500, content={"error": f"整合异常：{e}"})
 
 
+@app.post("/api/debug/built-prompt")
+async def api_debug_built_prompt(request: Request):
+    """诊断证据（只读，不调用上游模型）：用一条样例 user 消息跑真实的 prompt 组装函数，
+    返回真正会进入请求 body[messages] 的 system 块（分区缓存 + 非缓存两路），
+    证明小克人设(system_prompt.txt)与 user_profile 都被注入、且 user_profile 是独立标注块、与人设分开。"""
+    try:
+        b = await request.json()
+    except Exception:
+        b = {}
+    sample = (b.get("message") or "宝贝我到家了").strip()
+    up = await get_user_profile()
+    up_block = _compose_user_profile_block(up)
+    hdr = "# 关于阮阮（对话对象）"
+
+    def _sys_text(messages):
+        for m in messages:
+            if m.get("role") == "system":
+                c = m.get("content")
+                if isinstance(c, str):
+                    return c, m
+                if isinstance(c, list):
+                    return "".join(p.get("text", "") for p in c if isinstance(p, dict)), m
+        return "", None
+
+    def _assert(sys_text):
+        persona_head = (SYSTEM_PROMPT or "")[:40]
+        return {
+            "system_total_len": len(sys_text),
+            "persona_present": bool(SYSTEM_PROMPT) and (persona_head in sys_text),
+            "user_profile_block_present": (hdr in sys_text) if up_block else False,
+            "user_profile_header_index": sys_text.find(hdr),
+            "system_head_700": sys_text[:700],
+        }
+
+    out = {
+        "live_mode": "partition_cache" if CACHE_PARTITION_ENABLED else "non_cache",
+        "CACHE_PARTITION_ENABLED": CACHE_PARTITION_ENABLED,
+        "forward_note": "两路组装的结果都会被赋给 body['messages'] 后原样转发上游(main.py 1168/1188)。",
+        "persona_source": "system_prompt.txt",
+        "system_prompt_len": len(SYSTEM_PROMPT or ""),
+        "user_profile_set": bool(up and up.strip()),
+        "user_profile_len": len(up or ""),
+        "user_profile_block_rendered": up_block,
+        "sample_message": sample,
+    }
+    try:
+        part_msgs = await _build_basic_cached([], SYSTEM_PROMPT + up_block, sample, {"role": "user", "content": sample})
+        ptxt, psys = _sys_text(part_msgs)
+        last = part_msgs[-1]["content"] if part_msgs else ""
+        out["partition_cache_mode"] = {
+            "message_roles": [m.get("role") for m in part_msgs],
+            "system_is_cached_block": bool(psys and isinstance(psys.get("content"), list)),
+            "cache_control_on_system": bool(psys and isinstance(psys.get("content"), list) and any(p.get("cache_control") for p in psys["content"])),
+            **_assert(ptxt),
+            "current_user_turn_head_300": (last[:300] if isinstance(last, str) else ""),
+        }
+    except Exception as e:
+        out["partition_cache_mode"] = {"error": str(e)}
+    try:
+        enhanced = await build_system_prompt_with_memories(sample) if (MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED) else SYSTEM_PROMPT
+        enhanced = (enhanced or "") + up_block
+        out["non_cache_mode"] = _assert(enhanced)
+    except Exception as e:
+        out["non_cache_mode"] = {"error": str(e)}
+    return out
+
+
 @app.post("/api/persona-suggestions/{sug_id}")
 async def api_update_persona_suggestion(sug_id: int, request: Request):
     if not MEMORY_ENABLED:
