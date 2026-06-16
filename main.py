@@ -2020,6 +2020,7 @@ def _mw_item(row):
         "event_date": str(row["event_date"]) if row.get("event_date") else None,
         "importance": row.get("importance"),
         "is_active": row.get("is_active"),
+        "pinned": bool(mm.get("pinned")),
         "photos": row.get("photos", []),
     }
 
@@ -2060,7 +2061,8 @@ async def api_mw_create(request: Request):
                    "date": created_at, "author": author,
                    "author_cn": MW_AUTHOR_CN.get(author, author or ""),
                    "mood": mood, "source": source, "is_period_day": is_period,
-                   "location": location, "title": title, "body": body, "photos": []}
+                   "location": location, "title": title, "body": body,
+                   "pinned": bool(b.get("pinned")), "photos": []}
         mid = await save_migrated_memory(content=content, importance=importance, title=title,
                                          event_date=created_at, created_at=created_at, mw_meta=mw_meta)
         one = await get_memorywall_one(mid)
@@ -2081,12 +2083,13 @@ async def api_mw_update(mid: int, request: Request):
     mm = existing.get("mw_meta") or {}
     b = await request.json()
     title = (b["title"] if b.get("title") is not None else (mm.get("title") or existing.get("title") or "")).strip()
-    body = (b["body"] if b.get("body") is not None else _extract_mw_body(existing.get("content"))).strip()
+    body = (b["body"] if b.get("body") is not None else (mm.get("body") or _extract_mw_body(existing.get("content")))).strip()
     author = b.get("author") if "author" in b else mm.get("author")
     mood = b.get("mood") if "mood" in b else mm.get("mood")
     source = b.get("source") if "source" in b else mm.get("source")
     is_period = (1 if b.get("is_period_day") else 0) if "is_period_day" in b else mm.get("is_period_day", 0)
     location = b.get("location") if "location" in b else mm.get("location")
+    pinned = bool(b.get("pinned")) if "pinned" in b else bool(mm.get("pinned"))
     created_at = b.get("date") or mm.get("date") or (str(existing.get("created_at")) if existing.get("created_at") else datetime.now(timezone.utc).isoformat())
     summary = ""
     if len(body) > MW_SUMMARY_THRESHOLD:
@@ -2099,7 +2102,7 @@ async def api_mw_update(mid: int, request: Request):
     new_meta = dict(mm)
     new_meta.update({"date": created_at, "author": author, "author_cn": MW_AUTHOR_CN.get(author, author or ""),
                      "mood": mood, "source": source, "is_period_day": is_period, "location": location,
-                     "title": title, "body": body})
+                     "title": title, "body": body, "pinned": pinned})
     await update_memorywall(mid, content, title, importance, created_at, new_meta)
     one = await get_memorywall_one(mid)
     return {"status": "ok", "item": _mw_item(one) if one else {"id": mid}}

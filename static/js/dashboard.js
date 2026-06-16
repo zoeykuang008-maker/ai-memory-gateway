@@ -2175,23 +2175,38 @@ function renderMwCard(m) {
     const photos = (m.photos || []).map(p => `<img class="mw-thumb" src="${mwPhotoSrc(p.photo_id)}" onclick="window.open(this.src,'_blank')" alt="">`).join('');
     const body = escapeHtml(m.body || '').replace(/\n/g, '<br>');
     const longCls = (m.body || '').length > 220 ? ' mw-collapsed' : '';
+    const pinned = !!m.pinned;
+    const pinBadge = pinned ? `<span class="mw-badge" style="background:#ffe9a8;color:#7a5b00">📌 置顶</span>` : '';
+    const dateBadge = pinned ? '' : `<span class="mw-date">📅 ${escapeHtml(date)}</span>`;
+    const pinBtn = `<button class="btn btn-sm" onclick="togglePin(${m.id}, ${pinned ? 'false' : 'true'})">${pinned ? '取消置顶' : '📌 置顶'}</button>`;
     return `
-    <div class="mw-card" data-id="${m.id}">
+    <div class="mw-card${pinned ? ' mw-pinned' : ''}" data-id="${m.id}">
         <div class="mw-card-head">
-            <div class="mw-title">${escapeHtml(m.title || '(无标题)')}</div>
+            <div class="mw-title">${pinned ? '📌 ' : ''}${escapeHtml(m.title || '(无标题)')}</div>
             <div class="mw-actions">
+                ${pinBtn}
                 <button class="btn btn-sm" onclick="editMw(${m.id})">编辑</button>
                 <button class="btn btn-sm mw-danger" onclick="deleteMw(${m.id})">删除</button>
             </div>
         </div>
         <div class="mw-meta">
             <span class="mw-badge author">${escapeHtml(authorCn)}</span>
-            ${moodBadge}${srcBadge}${periodBadge}
-            <span class="mw-date">📅 ${escapeHtml(date)}</span>
+            ${pinBadge}${moodBadge}${srcBadge}${periodBadge}
+            ${dateBadge}
         </div>
         ${photos ? `<div class="mw-photos">${photos}</div>` : ''}
         <div class="mw-body${longCls}" onclick="this.classList.toggle('mw-collapsed')">${body}</div>
     </div>`;
+}
+
+async function togglePin(id, val) {
+    try {
+        await fetch('/api/memorywall/' + id, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pinned: val })
+        });
+        loadMemoryWall();
+    } catch (e) { alert('操作失败：' + e.message); }
 }
 
 function _mwForm() {

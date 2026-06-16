@@ -791,7 +791,7 @@ async def list_memorywall(author: str = None, mood: str = None, include_inactive
             params.append(author); sql += f" AND mw_meta->>'author' = ${len(params)}"
         if mood:
             params.append(mood); sql += f" AND mw_meta->>'mood' = ${len(params)}"
-        sql += " ORDER BY COALESCE(event_date, created_at::date) DESC, created_at DESC"
+        sql += " ORDER BY COALESCE((mw_meta->>'pinned') = 'true', FALSE) DESC, COALESCE(event_date, created_at::date) DESC, created_at DESC"
         rows = await conn.fetch(sql, *params)
     out = []
     for r in rows:
