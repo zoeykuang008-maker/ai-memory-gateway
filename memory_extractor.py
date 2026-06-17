@@ -58,12 +58,18 @@ EXTRACTION_PROMPT = """你是记忆提取专家。从对话中提取值得长期
 - 仅提取「完全新增」或「对已知信息的更正/补充」
 - 没有可提取的新信息就返回空数组 []
 
+# 铁则四：情绪坐标（Russell 模型，每条 fact 都给）
+- valence 效价 -1~+1：这条记忆的情绪正负（-1 痛苦/负面，0 中性，+1 愉悦/正面）
+- arousal 唤醒 0~1：情绪强度（0 平静，1 强烈）
+- 中性客观事实（如"例假6/14开始"）→ valence≈0、arousal≈0.2；情感浓的（表白/冲突/亲密/眼泪）→ 给相应值
+- persona 条目不需要情绪坐标
+
 # 输出格式（只返回 JSON 数组，不要其他文字）
 [
-  {{"kind": "fact", "content": "中性客观事实", "importance": 分数, "replaces_id": null}},
+  {{"kind": "fact", "content": "中性客观事实", "importance": 分数, "replaces_id": null, "valence": 0.0, "arousal": 0.2}},
   {{"kind": "persona", "content": "行为/相处偏好", "importance": 分数}}
 ]
-importance 为 1-10（10最重要）。没有可提取的就返回 []。
+importance 为 1-10（10最重要）；valence∈[-1,1]、arousal∈[0,1]。没有可提取的就返回 []。
 """
 
 
@@ -187,6 +193,15 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
                         "importance": int(mem.get("importance", 5)),
                         "kind": kind,
                     }
+                    # 情绪① Russell 坐标：clamp + 默认（arousal 默认 0.2 兼作地板）
+                    try:
+                        item["valence"] = max(-1.0, min(1.0, float(mem.get("valence", 0.0))))
+                    except (TypeError, ValueError):
+                        item["valence"] = 0.0
+                    try:
+                        item["arousal"] = max(0.0, min(1.0, float(mem.get("arousal", 0.2))))
+                    except (TypeError, ValueError):
+                        item["arousal"] = 0.2
                     rid = mem.get("replaces_id")
                     if isinstance(rid, bool):
                         rid = None

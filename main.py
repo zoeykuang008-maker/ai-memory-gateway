@@ -1045,6 +1045,8 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 content=mem["content"],
                 importance=mem["importance"],
                 source_session=session_id,
+                valence=mem.get("valence", 0.0),
+                arousal=mem.get("arousal", 0.2),
             )
             saved += 1
             # A2 冲突处理：新事实推翻旧事实 → 把被推翻的旧条目置 inactive（不再并存打架）

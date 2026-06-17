@@ -194,6 +194,28 @@ async def init_tables():
                 END IF;
             END $$;
         """)
+
+        # 情绪① 情感坐标（Russell circumplex）：valence 效价 -1~+1 / arousal 唤醒 0~1
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'valence'
+                ) THEN
+                    ALTER TABLE memories ADD COLUMN valence REAL DEFAULT 0;
+                END IF;
+            END $$;
+        """)
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'arousal'
+                ) THEN
+                    ALTER TABLE memories ADD COLUMN arousal REAL DEFAULT 0.2;
+                END IF;
+            END $$;
+        """)
         
         # merged_from: 合并来源的碎片ID列表
         await conn.execute("""
@@ -652,12 +674,15 @@ async def update_message_content(message_id: int, new_content: str):
 # 记忆操作
 # ============================================================
 
-async def save_memory(content: str, importance: int = 5, source_session: str = ""):
+async def save_memory(content: str, importance: int = 5, source_session: str = "", valence: float = 0.0, arousal: float = 0.2):
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # 情绪① 夹紧到合法范围（arousal 默认 0.2 兼作地板，避免后续衰减乘到 0 退化）
+        _val = max(-1.0, min(1.0, float(valence if valence is not None else 0.0)))
+        _aro = max(0.0, min(1.0, float(arousal if arousal is not None else 0.2)))
         row = await conn.fetchrow(
-            "INSERT INTO memories (content, importance, source_session) VALUES ($1, $2, $3) RETURNING id",
-            content, importance, source_session,
+            "INSERT INTO memories (content, importance, source_session, valence, arousal) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+            content, importance, source_session, _val, _aro,
         )
         
         # MEMORY_VECTOR_ENABLED 时自动计算 embedding
@@ -1297,7 +1322,7 @@ async def get_all_memories_detail(limit: int = None, layer: int = None, active_o
         
         rows = await conn.fetch(f"""
             SELECT id, content, importance, source_session, created_at,
-                   layer, title, is_active, merged_from, event_date
+                   layer, title, is_active, merged_from, event_date, valence, arousal
             FROM memories
             {where_clause}
             ORDER BY id
