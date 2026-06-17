@@ -1420,6 +1420,46 @@ async def get_all_memories_detail(limit: int = None, layer: int = None, active_o
         return [dict(r) for r in rows]
 
 
+async def get_emotion_backfill_targets(include_memorywall: bool = True, ids: list = None, limit: int = None):
+    """情绪回填：选出 valence/arousal 仍为默认(≈0 / ≈0.2)的活跃记忆。纯只读。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        conds = ["is_active = TRUE",
+                 "valence > -0.01 AND valence < 0.01",
+                 "arousal > 0.19 AND arousal < 0.21"]
+        params = []
+        if not include_memorywall:
+            conds.append("mw_meta IS NULL")
+        if ids:
+            params.append([int(i) for i in ids])
+            conds.append(f"id = ANY(${len(params)}::int[])")
+        where = " AND ".join(conds)
+        lim = ""
+        if limit:
+            params.append(int(limit))
+            lim = f"LIMIT ${len(params)}"
+        rows = await conn.fetch(
+            f"SELECT id, content, (mw_meta IS NOT NULL) AS is_mw FROM memories WHERE {where} ORDER BY id {lim}",
+            *params)
+        return [dict(r) for r in rows]
+
+
+async def update_emotion_only(memory_id: int, valence: float, arousal: float) -> bool:
+    """情绪回填专用：只写 valence/arousal，且仅当该行仍是默认值(幂等+安全)。
+    正文/importance/日期/source/layer 一律不碰。返回是否真的更新了。"""
+    v = max(-1.0, min(1.0, float(valence)))
+    a = max(0.0, min(1.0, float(arousal)))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        tag = await conn.execute(
+            """UPDATE memories SET valence = $2, arousal = $3
+               WHERE id = $1 AND is_active = TRUE
+                 AND valence > -0.01 AND valence < 0.01
+                 AND arousal > 0.19 AND arousal < 0.21""",
+            memory_id, v, a)
+        return bool(tag) and tag.rsplit(" ", 1)[-1] != "0"
+
+
 async def update_memory(memory_id: int, content: str = None, importance: int = None):
     """更新单条记忆"""
     pool = await get_pool()

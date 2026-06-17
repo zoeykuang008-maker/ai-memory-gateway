@@ -25,12 +25,12 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, Res
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, apply_mood_drift
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, apply_mood_drift, get_emotion_backfill_targets, update_emotion_only
 from database import save_migrated_memory, find_memory_by_mw_id, save_photo, link_photo_to_memory, get_photo, memory_photo_count, delete_memory_photos, get_mw_meta, update_mw_meta
 from database import list_memorywall, get_memorywall_one, update_memorywall, get_memory_photos, set_memory_active
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
-from memory_extractor import extract_memories, score_memories
+from memory_extractor import extract_memories, score_memories, tag_emotions_batch
 
 # ============================================================
 # 配置项 —— 全部从环境变量读取，部署时在云平台面板里设置
@@ -1659,6 +1659,85 @@ async def api_batch_delete(request: Request):
         return {"error": "未选择记忆"}
     await delete_memories_batch(ids)
     return {"status": "ok", "deleted": len(ids)}
+
+
+# ============================================================
+# 情绪① 回填：给现存默认情绪(0/0.2)的记忆补真实 valence/arousal
+# 批量喂 haiku（同 live 提取的 Russell 规则）；只写两列、仅默认行、幂等可重跑
+# dry_run=true 只算不写（小样自检）；不带则后台批处理，GET .../status 查进度
+# ============================================================
+_emotion_backfill_status = {"running": False, "total": 0, "done": 0, "written": 0,
+                            "error": None, "samples": [], "finished_at": None}
+
+
+@app.post("/api/memories/backfill-emotion")
+async def api_backfill_emotion(request: Request):
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    dry_run = bool(body.get("dry_run", False))
+    ids = body.get("ids") or None
+    limit = body.get("limit") or None
+    batch_size = int(body.get("batch_size", 25))
+    include_mw = bool(body.get("include_memorywall", True))
+
+    targets = await get_emotion_backfill_targets(include_memorywall=include_mw, ids=ids, limit=limit)
+
+    if dry_run:
+        samples = []
+        for i in range(0, len(targets), batch_size):
+            batch = targets[i:i + batch_size]
+            tagged = await tag_emotions_batch([{"id": t["id"], "content": t["content"]} for t in batch])
+            for t in batch:
+                e = tagged.get(t["id"])
+                samples.append({"id": t["id"], "is_mw": t["is_mw"],
+                                "valence": (e["valence"] if e else None),
+                                "arousal": (e["arousal"] if e else None),
+                                "content": str(t["content"])[:70]})
+        return {"dry_run": True, "count": len(targets), "samples": samples}
+
+    if _emotion_backfill_status["running"]:
+        return {"error": "情绪回填任务正在运行中"}
+    _emotion_backfill_status.update({"running": True, "total": len(targets), "done": 0,
+                                     "written": 0, "error": None, "samples": [], "finished_at": None})
+
+    async def _run():
+        try:
+            for i in range(0, len(targets), batch_size):
+                batch = targets[i:i + batch_size]
+                tagged = await tag_emotions_batch([{"id": t["id"], "content": t["content"]} for t in batch])
+                for t in batch:
+                    _emotion_backfill_status["done"] += 1
+                    e = tagged.get(t["id"])
+                    if not e:
+                        continue
+                    ok = await update_emotion_only(t["id"], e["valence"], e["arousal"])
+                    if ok:
+                        _emotion_backfill_status["written"] += 1
+                        if len(_emotion_backfill_status["samples"]) < 15:
+                            _emotion_backfill_status["samples"].append(
+                                {"id": t["id"], "is_mw": t["is_mw"],
+                                 "valence": e["valence"], "arousal": e["arousal"],
+                                 "content": str(t["content"])[:50]})
+                await asyncio.sleep(0.3)
+            _emotion_backfill_status["finished_at"] = datetime.now(timezone.utc).isoformat()
+            print(f"✅ 情绪回填完成 written={_emotion_backfill_status['written']}/{_emotion_backfill_status['total']}")
+        except Exception as e:
+            _emotion_backfill_status["error"] = str(e)
+            print(f"❌ 情绪回填异常: {e}")
+        finally:
+            _emotion_backfill_status["running"] = False
+
+    asyncio.create_task(_run())
+    return {"status": "started", "total": len(targets)}
+
+
+@app.get("/api/memories/backfill-emotion/status")
+async def api_backfill_emotion_status():
+    return dict(_emotion_backfill_status)
 
 
 # ============================================================

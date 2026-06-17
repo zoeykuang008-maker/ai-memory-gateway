@@ -312,3 +312,81 @@ async def score_memories(texts: List[str]) -> List[Dict]:
     except Exception as e:
         print(f"⚠️  记忆评分出错: {e}")
         return [{"content": t, "importance": 5} for t in texts]
+
+
+# ============================================================
+# 情绪① 回填：给已有记忆批量补 Russell valence/arousal（与 live 提取同规则）
+# ============================================================
+EMOTION_BACKFILL_PROMPT = """你是情绪标注专家，按 Russell 情感坐标给每条【已有记忆】打 valence/arousal。
+- valence 效价 -1~+1：这条记忆的情绪正负（-1 痛苦/负面，0 中性，+1 愉悦/正面）
+- arousal 唤醒 0~1：情绪强度（0 平静，1 强烈）
+- 中性客观事实（如"例假6/14开始""早上喝了咖啡""吃了药"）→ valence≈0、arousal≈0.2
+- 情感浓的（表白/亲密/冲突/眼泪/温暖纪念/重大喜悦或难过）→ 给相应值
+- 温暖/开心/纪念/深情的回忆 → 正效价；难过/痛苦/委屈 → 负效价。只按内容判断，不臆测。
+
+记忆列表（每行 "id: 内容"）：
+{items}
+
+只返回 JSON 数组，每条 {{"id": 原id, "valence": 数字, "arousal": 数字}}；不要任何解释或其他文字。"""
+
+
+async def tag_emotions_batch(items: list) -> dict:
+    """给一批已有记忆打 Russell 情绪坐标（情绪回填用，与 live 提取同口径）。
+    items=[{'id':N,'content':...}]；返回 {id(int): {'valence':v,'arousal':a}}；失败返回 {}。"""
+    if not API_KEY or not items:
+        return {}
+    lines = "\n".join(f'{it["id"]}: {str(it.get("content", ""))[:300]}' for it in items)
+    prompt = EMOTION_BACKFILL_PROMPT.format(items=lines)
+    try:
+        async with httpx.AsyncClient(timeout=90) as client:
+            response = await client.post(
+                API_BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {get_memory_api_key()}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://midsummer-gateway.local",
+                    "X-Title": "Midsummer Emotion Backfill",
+                },
+                json={
+                    "model": MEMORY_MODEL,
+                    "max_tokens": 3000,
+                    "temperature": 0,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            if response.status_code != 200:
+                print(f"⚠️  情绪回填请求失败: {response.status_code}")
+                return {}
+            text = response.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+            try:
+                arr = json.loads(text)
+            except json.JSONDecodeError:
+                import re
+                m = re.search(r'\[.*\]', text, re.DOTALL)
+                if not m:
+                    print("⚠️  情绪回填结果未找到 JSON 数组")
+                    return {}
+                arr = json.loads(m.group())
+            out = {}
+            if isinstance(arr, list):
+                for o in arr:
+                    if isinstance(o, dict) and "id" in o:
+                        try:
+                            out[int(o["id"])] = {
+                                "valence": max(-1.0, min(1.0, float(o.get("valence", 0.0)))),
+                                "arousal": max(0.0, min(1.0, float(o.get("arousal", 0.2)))),
+                            }
+                        except Exception:
+                            pass
+            print(f"📝 情绪回填打标 {len(out)}/{len(items)} 条")
+            return out
+    except Exception as e:
+        print(f"⚠️  情绪回填出错: {e}")
+        return {}
