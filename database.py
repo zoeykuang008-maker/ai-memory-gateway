@@ -216,7 +216,25 @@ async def init_tables():
                 END IF;
             END $$;
         """)
-        
+
+        # 情绪①-第二步 心情漂移：每条记忆每日漂移次数（防跑飞的「每条每日封顶」用；这两列仅作计数，不碰正文/importance/日期）
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'drift_day') THEN
+                    ALTER TABLE memories ADD COLUMN drift_day DATE DEFAULT NULL;
+                END IF;
+            END $$;
+        """)
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'drift_today') THEN
+                    ALTER TABLE memories ADD COLUMN drift_today SMALLINT DEFAULT 0;
+                END IF;
+            END $$;
+        """)
+
         # merged_from: 合并来源的碎片ID列表
         await conn.execute("""
             DO $$ BEGIN
@@ -1021,6 +1039,76 @@ async def search_memories(query: str, limit: int = 10):
         return results
 
 
+async def apply_mood_drift(hit_ids: list, step: float = 0.1, daily_cap: int = 3,
+                          recent_n: int = 30, skip_memorywall: bool = True, tz_hours: int = 8):
+    """情绪①-第二步 心情漂移：把【本轮命中】的旧记忆的情感坐标朝 current_mood 挪 ≤step 并写回 DB（持久）。
+    current_mood = (最近 recent_n 条活跃记忆均值 + 本轮命中均值) / 2（逐轴）。
+    只动 valence/arousal（clamp valence[-1,1] / arousal[0,1]），正文/importance/日期一律不碰。
+    防跑飞：步长≤step + 命中去重（每条每轮≤1次）+ 每条每日≤daily_cap 次（原子 SQL 守卫）。
+    skip_memorywall=True：回忆墙(mw_meta 非空)记忆既不漂移、也不进 mood 基线。
+    仅由聊天注入路径 fire-and-forget 调用；dashboard 搜索绝不触发。"""
+    from datetime import datetime, timezone, timedelta
+    try:
+        if not hit_ids:
+            return {"drifted": 0}
+        ids = list({int(i) for i in hit_ids})  # 去重 → 每条每轮≤1次
+        mw_filter = "AND mw_meta IS NULL" if skip_memorywall else ""
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            hit = await conn.fetchrow(
+                f"SELECT AVG(valence)::float AS v, AVG(arousal)::float AS a "
+                f"FROM memories WHERE id = ANY($1::int[]) AND is_active = TRUE {mw_filter}",
+                ids,
+            )
+            if not hit or hit["v"] is None:
+                return {"drifted": 0}
+            rec = await conn.fetchrow(
+                f"SELECT AVG(valence)::float AS v, AVG(arousal)::float AS a FROM "
+                f"(SELECT valence, arousal FROM memories WHERE is_active = TRUE {mw_filter} "
+                f"ORDER BY created_at DESC LIMIT $1) t",
+                recent_n,
+            )
+            rv = rec["v"] if rec and rec["v"] is not None else hit["v"]
+            ra = rec["a"] if rec and rec["a"] is not None else hit["a"]
+            mood_v = (rv + hit["v"]) / 2.0
+            mood_a = (ra + hit["a"]) / 2.0
+            today = (datetime.now(timezone.utc) + timedelta(hours=tz_hours)).date()
+            rows = await conn.fetch(
+                f"SELECT id, valence, arousal FROM memories "
+                f"WHERE id = ANY($1::int[]) AND is_active = TRUE {mw_filter}",
+                ids,
+            )
+            drifted = 0
+            details = []
+            for r in rows:
+                cv = float(r["valence"]); ca = float(r["arousal"])
+                dv = max(-step, min(step, mood_v - cv))
+                da = max(-step, min(step, mood_a - ca))
+                if abs(dv) < 1e-4 and abs(da) < 1e-4:
+                    continue  # 已在 mood 上 → 不动、也不耗每日额度
+                tag = await conn.execute(
+                    """
+                    UPDATE memories
+                    SET valence = GREATEST(-1.0, LEAST(1.0, valence + $2)),
+                        arousal = GREATEST(0.0, LEAST(1.0, arousal + $3)),
+                        drift_today = CASE WHEN drift_day = $4 THEN drift_today + 1 ELSE 1 END,
+                        drift_day = $4
+                    WHERE id = $1 AND (drift_day IS DISTINCT FROM $4 OR drift_today < $5)
+                    """,
+                    r["id"], dv, da, today, daily_cap,
+                )
+                if tag and tag.rsplit(" ", 1)[-1] != "0":
+                    drifted += 1
+                    if len(details) < 8:
+                        details.append({"id": int(r["id"]), "dv": round(dv, 4), "da": round(da, 4)})
+            if drifted:
+                print(f"🎭 心情漂移 mood=({mood_v:.2f},{mood_a:.2f}) 漂{drifted}/{len(rows)}条 step≤{step} cap{daily_cap}/日")
+            return {"drifted": drifted, "mood": [round(mood_v, 3), round(mood_a, 3)], "details": details}
+    except Exception as e:
+        print(f"⚠️ 心情漂移失败: {e}")
+        return {"drifted": 0, "error": str(e)}
+
+
 async def search_memories_hybrid(query: str, limit: int = 10):
     """
     记忆混合搜索：关键词 + 向量，归一化后四维加权
@@ -1322,7 +1410,8 @@ async def get_all_memories_detail(limit: int = None, layer: int = None, active_o
         
         rows = await conn.fetch(f"""
             SELECT id, content, importance, source_session, created_at,
-                   layer, title, is_active, merged_from, event_date, valence, arousal
+                   layer, title, is_active, merged_from, event_date, valence, arousal,
+                   drift_day, drift_today
             FROM memories
             {where_clause}
             ORDER BY id

@@ -25,7 +25,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, Res
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, apply_mood_drift
 from database import save_migrated_memory, find_memory_by_mw_id, save_photo, link_photo_to_memory, get_photo, memory_photo_count, delete_memory_photos, get_mw_meta, update_mw_meta
 from database import list_memorywall, get_memorywall_one, update_memorywall, get_memory_photos, set_memory_active
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion
@@ -69,6 +69,13 @@ MEMORY_EXTRACT_INTERVAL = int(os.getenv("MEMORY_EXTRACT_INTERVAL", "1"))
 
 # 记忆提取+注入总开关（false时数据库仍连接、消息仍存储，但不提取也不注入记忆）
 MEMORY_EXTRACT_ENABLED = os.getenv("MEMORY_EXTRACT_ENABLED", "true").lower() == "true"
+
+# 情绪①-第二步 心情漂移（命中的旧记忆朝当前心情挪 ≤step、写回 DB；只动 valence/arousal，正文/importance/日期不碰）
+MOOD_DRIFT_ENABLED = os.getenv("MOOD_DRIFT_ENABLED", "true").lower() == "true"
+MOOD_DRIFT_STEP = float(os.getenv("MOOD_DRIFT_STEP", "0.1"))            # 每条每轮最大步长
+MOOD_DRIFT_DAILY_CAP = int(os.getenv("MOOD_DRIFT_DAILY_CAP", "3"))      # 每条每日漂移次数封顶
+MOOD_RECENT_N = int(os.getenv("MOOD_RECENT_N", "30"))                   # current_mood 的「最近记忆」窗口
+MOOD_DRIFT_SKIP_MEMORYWALL = os.getenv("MOOD_DRIFT_SKIP_MEMORYWALL", "true").lower() == "true"  # 回忆墙豁免漂移+不进基线
 
 # 分区缓存
 CACHE_PARTITION_ENABLED = os.getenv("CACHE_PARTITION_ENABLED", "false").lower() == "true"
@@ -376,6 +383,18 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
 
         if not memories:
             return persona
+
+        # 情绪①-第二步：把本轮命中的旧记忆朝当前心情挪 ≤0.1（fire-and-forget，不阻塞回复；仅聊天注入路径触发）
+        if MOOD_DRIFT_ENABLED:
+            try:
+                asyncio.create_task(apply_mood_drift(
+                    [m["id"] for m in memories],
+                    step=MOOD_DRIFT_STEP, daily_cap=MOOD_DRIFT_DAILY_CAP,
+                    recent_n=MOOD_RECENT_N, skip_memorywall=MOOD_DRIFT_SKIP_MEMORYWALL,
+                    tz_hours=TIMEZONE_HOURS,
+                ))
+            except Exception as _e:
+                print(f"⚠️ 心情漂移调度失败: {_e}")
         
         # 格式化记忆文本（带日期，帮助模型判断新旧）
         memory_lines = []
@@ -832,6 +851,18 @@ async def build_memory_text(user_message: str) -> str:
         memories = await search_memories(user_message, limit=MAX_MEMORIES_INJECT)
         if not memories:
             return ""
+
+        # 情绪①-第二步：把本轮命中的旧记忆朝当前心情挪 ≤0.1（fire-and-forget，不阻塞回复；仅聊天注入路径触发）
+        if MOOD_DRIFT_ENABLED:
+            try:
+                asyncio.create_task(apply_mood_drift(
+                    [m["id"] for m in memories],
+                    step=MOOD_DRIFT_STEP, daily_cap=MOOD_DRIFT_DAILY_CAP,
+                    recent_n=MOOD_RECENT_N, skip_memorywall=MOOD_DRIFT_SKIP_MEMORYWALL,
+                    tz_hours=TIMEZONE_HOURS,
+                ))
+            except Exception as _e:
+                print(f"⚠️ 心情漂移调度失败(分区): {_e}")
 
         scores = [float(m.get("score") or 0) for m in memories]
         top_score = scores[0] if scores else 0.0
