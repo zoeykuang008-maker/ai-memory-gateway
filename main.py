@@ -2356,7 +2356,7 @@ async def api_debug_built_prompt(request: Request):
         "sample_message": sample,
     }
     try:
-        part_msgs = await _build_basic_cached([], persona + up_block, sample, {"role": "user", "content": sample})
+        part_msgs = await _build_basic_cached([], persona + up_block + "\n\n" + MEMORY_GUIDANCE, sample, {"role": "user", "content": sample})
         ptxt, psys = _sys_text(part_msgs)
         last = part_msgs[-1]["content"] if part_msgs else ""
         out["partition_cache_mode"] = {
@@ -2364,6 +2364,8 @@ async def api_debug_built_prompt(request: Request):
             "system_is_cached_block": bool(psys and isinstance(psys.get("content"), list)),
             "cache_control_on_system": bool(psys and isinstance(psys.get("content"), list) and any(p.get("cache_control") for p in psys["content"])),
             **_assert(ptxt),
+            "current_user_turn_len": (len(last) if isinstance(last, str) else 0),
+            "total_injected_chars": (len(ptxt) + (len(last) if isinstance(last, str) else 0)),
             "current_user_turn_head_300": (last[:300] if isinstance(last, str) else ""),
         }
     except Exception as e:
