@@ -918,7 +918,7 @@ async def search_memories(query: str, limit: int = 10):
         
         sql = f"""
             SELECT 
-                id, content, importance, created_at,
+                id, content, importance, created_at, mw_meta,
                 ({hit_count_expr}) AS hit_count,
                 (
                     {WEIGHT_KEYWORD} * ({hit_count_expr})::float / {max_hits}.0 +
