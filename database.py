@@ -38,6 +38,16 @@ WEIGHT_RECENCY = float(os.getenv("WEIGHT_RECENCY", "0.2"))
 MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "0.15"))
 SEARCH_COMMON_FRAC = float(os.getenv("SEARCH_COMMON_FRAC", "0.10"))  # 关键词 df 超过语料这一占比=高频噪声→从匹配集剔除（IDF 降噪，自适应，不维护停用词表）
 
+# A: 时间指示词（闭集，不会长大）——不参与字面 token 匹配，时间召回交给 recency 逻辑。
+# 否则"今天"会精准撞上"阮阮今天…"那批当天记忆；且 IDF 因其语料稀有反而把它当宝贝保留。
+TIME_DEIXIS = {
+    "今天", "昨天", "明天", "后天", "前天", "大前天", "大后天",
+    "今早", "今晚", "今夜", "昨晚", "昨夜", "明早", "明晚", "昨儿", "明儿",
+    "现在", "此刻", "当下", "眼下", "刚才", "方才", "这会儿", "待会儿", "一会儿",
+    "早上", "早晨", "清晨", "上午", "中午", "晌午", "下午", "傍晚", "晚上", "夜里", "夜晚", "半夜", "凌晨", "白天",
+    "今", "昨", "晨", "凌",  # 纯时间指示的单字（IDF 会误当稀有词保留）
+}
+
 # 记忆混合搜索权重（MEMORY_VECTOR_ENABLED=true 时生效）
 MEMORY_HW_KEYWORD = float(os.getenv("MEMORY_HW_KEYWORD", "0.35"))
 MEMORY_HW_SEMANTIC = float(os.getenv("MEMORY_HW_SEMANTIC", "0.35"))
@@ -902,7 +912,10 @@ async def search_memories(query: str, limit: int = 10):
     pool = await get_pool()
     async with pool.acquire() as conn:
         # === IDF 降噪：用语料真实 df 给关键词加权，并把高频词（含"今天/的/我"这类）从匹配集剔除 ===
-        kw_list = list(keywords)
+        # A: 剔除时间指示词（时间召回交给 recency，绝不靠字面 token）
+        kw_list = [k for k in keywords if k not in TIME_DEIXIS]
+        if not kw_list:
+            return []
         N = await conn.fetchval("SELECT COUNT(*) FROM memories WHERE is_active = TRUE") or 1
         df_sel = ", ".join(
             f"SUM(CASE WHEN content ILIKE '%' || ${i+1} || '%' THEN 1 ELSE 0 END) AS df{i}"
@@ -943,6 +956,7 @@ async def search_memories(query: str, limit: int = 10):
             SELECT
                 id, content, importance, created_at, mw_meta,
                 ({whit_expr}) AS whit,
+                ({WEIGHT_KEYWORD} * ({whit_expr}) / {sum_w:.4f}) AS kw_score,
                 (
                     {WEIGHT_KEYWORD} * ({whit_expr}) / {sum_w:.4f} +
                     {WEIGHT_IMPORTANCE} * importance::float / 10.0 +
@@ -956,9 +970,11 @@ async def search_memories(query: str, limit: int = 10):
 
         results = await conn.fetch(sql, *params)
 
+        # B: 相关性闸门 —— 用「关键词得分」过滤；importance/recency 只在已相关集合里排序，
+        #    不能单凭高 imp + 新近就把零关键词相关的记忆顶进来。无关键词相关→根本不注入。
         if MIN_SCORE_THRESHOLD > 0:
             before_count = len(results)
-            results = [r for r in results if r['score'] >= MIN_SCORE_THRESHOLD]
+            results = [r for r in results if r['kw_score'] >= MIN_SCORE_THRESHOLD]
             filtered = before_count - len(results)
         else:
             filtered = 0
