@@ -36,6 +36,7 @@ WEIGHT_KEYWORD = float(os.getenv("WEIGHT_KEYWORD", "0.5"))
 WEIGHT_IMPORTANCE = float(os.getenv("WEIGHT_IMPORTANCE", "0.3"))
 WEIGHT_RECENCY = float(os.getenv("WEIGHT_RECENCY", "0.2"))
 MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "0.15"))
+SEARCH_COMMON_FRAC = float(os.getenv("SEARCH_COMMON_FRAC", "0.10"))  # 关键词 df 超过语料这一占比=高频噪声→从匹配集剔除（IDF 降噪，自适应，不维护停用词表）
 
 # 记忆混合搜索权重（MEMORY_VECTOR_ENABLED=true 时生效）
 MEMORY_HW_KEYWORD = float(os.getenv("MEMORY_HW_KEYWORD", "0.35"))
@@ -330,6 +331,7 @@ async def init_tables():
 # 中文分词工具（基于 jieba）
 # ============================================================
 
+import math
 import jieba
 import jieba.analyse
 
@@ -899,29 +901,50 @@ async def search_memories(query: str, limit: int = 10):
     
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # 每个关键词命中得1分
-        case_parts = []
-        params = []
-        for i, kw in enumerate(keywords):
-            case_parts.append(f"CASE WHEN content ILIKE '%' || ${i+1} || '%' THEN 1 ELSE 0 END")
-            params.append(kw)
-        
-        hit_count_expr = " + ".join(case_parts)
-        max_hits = len(keywords)
-        
-        # 至少命中一个关键词（只搜索活跃记忆）
-        where_parts = [f"content ILIKE '%' || ${i+1} || '%'" for i in range(len(keywords))]
-        where_clause = f"is_active = TRUE AND ({' OR '.join(where_parts)})"
-        
-        limit_idx = len(keywords) + 1
+        # === IDF 降噪：用语料真实 df 给关键词加权，并把高频词（含"今天/的/我"这类）从匹配集剔除 ===
+        kw_list = list(keywords)
+        N = await conn.fetchval("SELECT COUNT(*) FROM memories WHERE is_active = TRUE") or 1
+        df_sel = ", ".join(
+            f"SUM(CASE WHEN content ILIKE '%' || ${i+1} || '%' THEN 1 ELSE 0 END) AS df{i}"
+            for i in range(len(kw_list))
+        )
+        df_row = await conn.fetchrow(f"SELECT {df_sel} FROM memories WHERE is_active = TRUE", *kw_list)
+        common_cut = max(2, int(N * SEARCH_COMMON_FRAC))
+        kept = []        # [(kw, idf)] 参与匹配+加权
+        dropped = []     # [(kw, df)] 高频被剔除
+        idf_of = {}
+        for i, kw in enumerate(kw_list):
+            df = df_row[f"df{i}"] or 0
+            idf = math.log((N + 1.0) / (df + 1.0)) + 1.0
+            idf_of[kw] = (df, idf)
+            if df > common_cut:
+                dropped.append((kw, df))
+            else:
+                kept.append((kw, idf))
+        if not kept:
+            # 整句都是高频词 → 不强行召回噪声，只保留最稀有的一个兜底
+            rarest = min(kw_list, key=lambda k: idf_of[k][0])
+            kept = [(rarest, idf_of[rarest][1])]
+            dropped = [(k, idf_of[k][0]) for k in kw_list if k != rarest]
+
+        params = [kw for kw, _ in kept]
+        sum_w = sum(w for _, w in kept) or 1.0
+        whit_expr = " + ".join(
+            f"{w:.4f}*(CASE WHEN content ILIKE '%' || ${i+1} || '%' THEN 1 ELSE 0 END)"
+            for i, (kw, w) in enumerate(kept)
+        )
+        where_clause = "is_active = TRUE AND (" + " OR ".join(
+            f"content ILIKE '%' || ${i+1} || '%'" for i in range(len(kept))
+        ) + ")"
+        limit_idx = len(kept) + 1
         params.append(limit)
-        
+
         sql = f"""
-            SELECT 
+            SELECT
                 id, content, importance, created_at, mw_meta,
-                ({hit_count_expr}) AS hit_count,
+                ({whit_expr}) AS whit,
                 (
-                    {WEIGHT_KEYWORD} * ({hit_count_expr})::float / {max_hits}.0 +
+                    {WEIGHT_KEYWORD} * ({whit_expr}) / {sum_w:.4f} +
                     {WEIGHT_IMPORTANCE} * importance::float / 10.0 +
                     {WEIGHT_RECENCY} * (1.0 / (1.0 + EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400.0))
                 ) AS score
@@ -930,30 +953,30 @@ async def search_memories(query: str, limit: int = 10):
             ORDER BY score DESC, importance DESC, created_at DESC
             LIMIT ${limit_idx}
         """
-        
+
         results = await conn.fetch(sql, *params)
-        
-        # 过滤低分记忆
+
         if MIN_SCORE_THRESHOLD > 0:
             before_count = len(results)
             results = [r for r in results if r['score'] >= MIN_SCORE_THRESHOLD]
             filtered = before_count - len(results)
         else:
             filtered = 0
-        
+
+        _keep_kw = [k for k, _ in kept]
+        _drop_kw = [k for k, _ in dropped]
         if results:
-            print(f"🔍 搜索 '{query}' → 关键词 {keywords[:8]}{'...' if len(keywords)>8 else ''} → 命中 {len(results)} 条" + (f"（过滤 {filtered} 条低分）" if filtered else ""))
+            print(f"🔍 '{query}' → 留{_keep_kw[:8]} 丢{_drop_kw[:8]} → 命中 {len(results)} 条" + (f"（过滤 {filtered} 低分）" if filtered else ""))
             for r in results[:3]:
-                print(f"   📌 [score={r['score']:.3f}] (hits={r['hit_count']}, imp={r['importance']}) {r['content'][:60]}...")
-            
+                print(f"   📌 [score={r['score']:.3f}] (imp={r['importance']}) {r['content'][:50]}...")
             ids = [r["id"] for r in results]
             await conn.execute(
                 "UPDATE memories SET last_accessed = NOW() WHERE id = ANY($1::int[])",
                 ids,
             )
         else:
-            print(f"🔍 搜索 '{query}' → 关键词 {keywords[:8]} → 无结果" + (f"（{filtered} 条被分数阈值过滤）" if filtered else ""))
-        
+            print(f"🔍 '{query}' → 留{_keep_kw[:8]} 丢{_drop_kw[:8]} → 无结果" + (f"（{filtered} 被阈值过滤）" if filtered else ""))
+
         return results
 
 
