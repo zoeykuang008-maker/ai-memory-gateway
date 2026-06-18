@@ -2226,6 +2226,7 @@ async def api_revive_dry(request: Request):
         return {"error": "无活跃对话线"}
     date_s = (body.get("date") or "").strip()
     max_msgs = int(body.get("max_msgs", 60))
+    offset = int(body.get("offset", 0))
 
     rows = await get_conversation_messages(sid, limit=10000)
     if not rows:
@@ -2253,7 +2254,7 @@ async def api_revive_dry(request: Request):
     if not day_msgs:
         return {"error": f"{date_s} 无对话", "available_dates": list(by_date.keys())[:30]}
 
-    window = day_msgs[:max_msgs]
+    window = day_msgs[offset:offset + max_msgs]
     msgs_for_extract = [{"role": m.get("role"), "content": (m.get("content") or "")}
                         for m in window if (m.get("content") or "").strip()]
 
@@ -2291,6 +2292,8 @@ async def api_revive_dry(request: Request):
         "dry_run": True,
         "active_session": sid,
         "date": date_s,
+        "day_total_msgs": len(day_msgs),
+        "offset": offset,
         "window_msgs": len(msgs_for_extract),
         "available_dates": list(by_date.keys())[:30],
         "existing_dry_fragments_on_day": dry_on_day[:30],
