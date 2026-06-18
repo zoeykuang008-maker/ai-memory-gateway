@@ -2258,7 +2258,6 @@ async def api_revive_dry(request: Request):
                         for m in window if (m.get("content") or "").strip()]
 
     all_mem = await get_all_memories_detail()
-    existing = [{"id": x["id"], "content": x["content"]} for x in all_mem if x.get("content")]
 
     def _is_dry(x):
         try:
@@ -2271,7 +2270,9 @@ async def api_revive_dry(request: Request):
         if x.get("source_session") == sid and _is_dry(x) and _local_date(x.get("created_at")) == date_s:
             dry_on_day.append({"id": x["id"], "content": (x.get("content") or "")[:80]})
 
-    revived = await extract_memories(msgs_for_extract, existing_memories=existing)
+    # 复活：重提取时【不传 existing】——要的就是把同样内容带情绪/现场重做一遍；
+    # 去重/replaces_id(对账干碎片、跳过已有好记忆)留到真·写入 pass 再做。
+    revived = await extract_memories(msgs_for_extract, existing_memories=None)
 
     return {
         "dry_run": True,
