@@ -817,8 +817,15 @@ async def generate_dream(session_id: str, date_s: str) -> dict:
 - 留住你俩的语气、玩笑、亲密的质感，按时间脉络写这一天的情绪起伏。
 - 私密/亲密的部分可以含蓄带过、点到即止，不必复述露骨细节，但**那份感觉要在**。
 
-只返回 JSON（不要其他文字）：
-{{"diary": "第一人称日记，400-700字，有温度", "summary": "当日总结一句话，≤60字，给'昨日桥'用", "card_title": "一句话卡片标题", "card_body": "卡片正文1-2句"}}
+严格按下面四段输出，每个标记独占一行，别加别的、别用 JSON、别用代码块：
+【日记】
+（第一人称日记，400-700字，有温度，可分段）
+【当日总结】
+（一句话，≤60字，给"昨日桥"用）
+【卡片标题】
+（一句话标题）
+【卡片正文】
+（1-2句）
 
 这一天的对话：
 ---
@@ -839,27 +846,22 @@ async def generate_dream(session_id: str, date_s: str) -> dict:
                 print(f"⚠️ 做梦失败 HTTP {response.status_code}")
                 return {"error": f"HTTP {response.status_code}", "convo_chars": len(convo), "raw": (response.text or '')[:200]}
             text = (response.json().get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
-            if text.startswith("```json"):
-                text = text[7:]
             if text.startswith("```"):
-                text = text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
-            try:
-                d = json.loads(text)
-            except json.JSONDecodeError:
-                import re
-                mt = re.search(r'\{.*\}', text, re.DOTALL)
-                if not mt:
-                    print(f"⚠️ 做梦结果非JSON: {text[:120]}")
-                    return {"error": "non-JSON", "raw_head": text[:200], "convo_chars": len(convo)}
-                d = json.loads(mt.group())
-            if not isinstance(d, dict) or not (d.get("diary") or "").strip():
+                text = text.strip("`").strip()
+                if text[:4].lower() == "json":
+                    text = text[4:].strip()
+            # 标记分段解析（散文不进 JSON，杜绝换行/引号转义崩溃）
+            import re
+            parts = re.split(r'【(日记|当日总结|卡片标题|卡片正文)】', text)
+            sec = {}
+            for k in range(1, len(parts) - 1, 2):
+                sec[parts[k]] = parts[k + 1].strip()
+            diary = sec.get("日记", "").strip() or text.strip()  # 无标记兜底：全文当日记
+            if not diary:
                 return {"error": "empty-diary", "raw_head": text[:200]}
-            print(f"💤 做梦生成 {date_s}: 日记{len(d.get('diary',''))}字")
-            return {"date": date_s, "diary": d.get("diary", ""), "summary": d.get("summary", ""),
-                    "card_title": d.get("card_title", ""), "card_body": d.get("card_body", ""),
+            print(f"💤 做梦生成 {date_s}: 日记{len(diary)}字")
+            return {"date": date_s, "diary": diary, "summary": sec.get("当日总结", "").strip(),
+                    "card_title": sec.get("卡片标题", "").strip(), "card_body": sec.get("卡片正文", "").strip(),
                     "source_msgs": convo.count("\n")}
     except Exception as e:
         print(f"⚠️ 做梦异常: {e}")
