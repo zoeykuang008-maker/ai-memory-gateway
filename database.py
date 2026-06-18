@@ -311,6 +311,21 @@ async def init_tables():
             CREATE INDEX IF NOT EXISTS idx_persona_suggestions_status ON persona_suggestions (status, created_at DESC);
         """)
 
+        # ② L5根基候选（里程碑待审队列；机器只增、阮阮审核确认后才进 l5Foundation 正文）
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS l5_candidates (
+                id             SERIAL PRIMARY KEY,
+                content        TEXT NOT NULL,
+                event_date     DATE,
+                source_session TEXT,
+                status         TEXT DEFAULT 'pending',
+                created_at     TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_l5_candidates_status ON l5_candidates (status, created_at DESC);
+        """)
+
         # 尝试启用pgvector扩展（向量搜索）
         try:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -902,6 +917,36 @@ async def set_memory_active(memory_id: int, active: bool):
 
 
 # ---- 人设建议（A4）：行为/相处偏好的收集，供主理人贴 persona ----
+
+async def save_l5_candidate(content: str, event_date=None, source_session: str = ""):
+    """② L5根基：里程碑候选入待审队列（机器只增；同内容 pending 去重）。不进 l5Foundation 正文。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT id FROM l5_candidates WHERE content = $1 AND status = 'pending' LIMIT 1", content)
+        if existing:
+            return existing['id']
+        row = await conn.fetchrow(
+            "INSERT INTO l5_candidates (content, event_date, source_session) VALUES ($1, $2::text::date, $3) RETURNING id",
+            content, (str(event_date) if event_date else None), source_session)
+        return row['id']
+
+
+async def list_l5_candidates(status: str = "pending"):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if status == "all":
+            rows = await conn.fetch("SELECT id, content, event_date, source_session, status, created_at FROM l5_candidates ORDER BY created_at DESC")
+        else:
+            rows = await conn.fetch("SELECT id, content, event_date, source_session, status, created_at FROM l5_candidates WHERE status = $1 ORDER BY created_at DESC", status)
+        return [dict(r) for r in rows]
+
+
+async def update_l5_candidate(cand_id: int, status: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE l5_candidates SET status = $2 WHERE id = $1", cand_id, status)
+
 
 async def save_persona_suggestion(content: str, source_session: str = ""):
     pool = await get_pool()

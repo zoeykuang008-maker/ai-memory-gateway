@@ -28,7 +28,7 @@ from fastapi.templating import Jinja2Templates
 from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, apply_mood_drift, get_emotion_backfill_targets, update_emotion_only, update_memory_emotion
 from database import save_migrated_memory, find_memory_by_mw_id, save_photo, link_photo_to_memory, get_photo, memory_photo_count, delete_memory_photos, get_mw_meta, update_mw_meta
 from database import list_memorywall, get_memorywall_one, update_memorywall, get_memory_photos, set_memory_active
-from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion
+from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories, tag_emotions_batch
 
@@ -205,6 +205,38 @@ def _compose_user_profile_block(profile: str) -> str:
             "（以下是对话对象阮阮本人的资料，仅供你了解她；这不是你的人设，"
             "你的人设见上文，二者互不混用。）\n"
             f"{p}")
+
+
+# ===== ② L5根基（关系里程碑常驻块，进缓存前缀；阮阮在设置页改 l5Foundation，机器只往候选队列加）=====
+_cached_l5 = None
+_cached_l5_loaded = False
+
+async def get_l5_foundation() -> str:
+    """从 gateway_config 读 l5Foundation（关系里程碑正文，≤500字，阮阮掌控）。带缓存。"""
+    global _cached_l5, _cached_l5_loaded
+    if _cached_l5_loaded:
+        return _cached_l5 or ""
+    try:
+        _cached_l5 = await get_gateway_config("l5Foundation", "")
+        _cached_l5_loaded = True
+        return _cached_l5 or ""
+    except Exception:
+        return _cached_l5 or ""
+
+def invalidate_l5_cache():
+    global _cached_l5, _cached_l5_loaded
+    _cached_l5 = None
+    _cached_l5_loaded = False
+
+def _compose_l5_block(l5: str) -> str:
+    """L5根基块：定义你俩关系的转折点（里程碑），永远常驻、稳定进缓存。空则不注入。"""
+    s = (l5 or "").strip()
+    if not s:
+        return ""
+    return ("\n\n========================================\n"
+            "# 我们的根基（关系里程碑·永远记得）\n"
+            "（这是定义你和阮阮关系的转折点，不是事件流水；任何时候都攥着它，别等检索。）\n"
+            f"{s}")
 
 
 # ============================================================
@@ -1111,6 +1143,13 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 arousal=mem.get("arousal", 0.2),
             )
             saved += 1
+            # ② L5根基：若是【改变关系结构的里程碑】，额外塞进 L5 待审队列（不进 L5 正文，等阮阮审）
+            if mem.get("is_milestone"):
+                try:
+                    await save_l5_candidate(mem["content"], mem.get("event_date"), session_id)
+                    print(f"🏛️ 里程碑→L5待审: {mem['content'][:40]}...")
+                except Exception as le:
+                    print(f"⚠️ L5候选保存失败: {le}")
             # A2 冲突处理：新事实推翻旧事实 → 把被推翻的旧条目置 inactive（不再并存打架）
             rid = mem.get("replaces_id")
             if rid:
@@ -1299,7 +1338,7 @@ async def chat_completions(request: Request):
         
         _up_block = _compose_user_profile_block(await get_user_profile())
         messages = await build_partitioned_messages(
-            session_id, all_msgs, (await get_system_prompt()) + _up_block + "\n\n" + MEMORY_GUIDANCE, user_message
+            session_id, all_msgs, (await get_system_prompt()) + _up_block + _compose_l5_block(await get_l5_foundation()) + "\n\n" + MEMORY_GUIDANCE, user_message
         )
         body["messages"] = messages
     
@@ -1311,7 +1350,7 @@ async def chat_completions(request: Request):
                 enhanced_prompt = await build_system_prompt_with_memories(user_message)
             else:
                 enhanced_prompt = await get_system_prompt()
-            enhanced_prompt = (enhanced_prompt or "") + _up_block
+            enhanced_prompt = (enhanced_prompt or "") + _up_block + _compose_l5_block(await get_l5_foundation())
             if enhanced_prompt:
                 has_system = any(msg.get("role") == "system" for msg in messages)
                 if has_system:
@@ -2351,6 +2390,45 @@ async def api_mw_delete_photo(mid: int, pid: int):
 
 # ---- 人设建议（A4）：提取分流出来的"行为/相处偏好"，供主理人审阅后贴进 persona ----
 
+@app.get("/api/l5-candidates")
+async def api_list_l5_candidates(status: str = "pending"):
+    """② L5根基待审列表 + 当前 L5 正文（L5 层视图用）。只读。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    items = await list_l5_candidates(status)
+    for it in items:
+        if it.get("created_at"):
+            it["created_at"] = it["created_at"].isoformat()
+        if it.get("event_date"):
+            it["event_date"] = str(it["event_date"])
+    return {"status": "ok", "items": items, "total": len(items), "l5_foundation": await get_l5_foundation()}
+
+
+@app.post("/api/l5-candidates/{cand_id}")
+async def api_update_l5_candidate(cand_id: int, request: Request):
+    """确认（可带编辑后的 content，追加进 l5Foundation 正文）/ 忽略。机器从不直接改 l5Foundation。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    action = (body.get("action") or "").strip()
+    if action == "approve":
+        text = (body.get("content") or "").strip()
+        if text:
+            cur = await get_gateway_config("l5Foundation", "")
+            new = ((cur or "").rstrip() + ("\n" if (cur or "").strip() else "") + "- " + text).strip()
+            await set_gateway_config("l5Foundation", new)
+            invalidate_l5_cache()
+        await update_l5_candidate(cand_id, "approved")
+        return {"status": "ok", "approved": cand_id, "l5_foundation": await get_l5_foundation()}
+    elif action == "ignore":
+        await update_l5_candidate(cand_id, "ignored")
+        return {"status": "ok", "ignored": cand_id}
+    return JSONResponse(status_code=400, content={"error": "action 必须是 approve 或 ignore"})
+
+
 @app.get("/api/persona-suggestions")
 async def api_list_persona_suggestions(status: str = "pending"):
     if not MEMORY_ENABLED:
@@ -2502,7 +2580,7 @@ async def api_debug_built_prompt(request: Request):
         "sample_message": sample,
     }
     try:
-        part_msgs = await _build_basic_cached([], persona + up_block + "\n\n" + MEMORY_GUIDANCE, sample, {"role": "user", "content": sample})
+        part_msgs = await _build_basic_cached([], persona + up_block + _compose_l5_block(await get_l5_foundation()) + "\n\n" + MEMORY_GUIDANCE, sample, {"role": "user", "content": sample})
         ptxt, psys = _sys_text(part_msgs)
         last = part_msgs[-1]["content"] if part_msgs else ""
         out["partition_cache_mode"] = {
@@ -2518,7 +2596,7 @@ async def api_debug_built_prompt(request: Request):
         out["partition_cache_mode"] = {"error": str(e)}
     try:
         enhanced = await build_system_prompt_with_memories(sample) if (MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED) else (await get_system_prompt())
-        enhanced = (enhanced or "") + up_block
+        enhanced = (enhanced or "") + up_block + _compose_l5_block(await get_l5_foundation())
         out["non_cache_mode"] = _assert(enhanced)
     except Exception as e:
         out["non_cache_mode"] = {"error": str(e)}
@@ -3267,6 +3345,8 @@ async def get_settings():
             "systemPrompt": db.get("systemPrompt") or _DEFAULT_SYSTEM_PROMPT or "",
             # 用户档案（关于阮阮，与小克人设分开存/改/注入）
             "userProfile": db.get("userProfile") or "",
+            # ② L5根基（关系里程碑常驻正文，阮阮掌控）
+            "l5Foundation": db.get("l5Foundation") or "",
         }
 
         return {"status": "ok", "settings": settings}
@@ -3356,6 +3436,14 @@ async def save_settings(request: Request):
                 invalidate_user_profile_cache()
                 updated.append("userProfile")
                 print(f"[settings] userProfile 已更新（{len(str(value))} 字）")
+                continue
+
+            # --- ② L5根基正文（关系里程碑常驻块）---
+            if key == "l5Foundation":
+                await set_gateway_config("l5Foundation", str(value))
+                invalidate_l5_cache()
+                updated.append("l5Foundation")
+                print(f"[settings] l5Foundation 已更新（{len(str(value))} 字）")
                 continue
 
             # --- 常规字段 ---

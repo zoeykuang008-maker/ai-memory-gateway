@@ -70,12 +70,18 @@ EXTRACTION_PROMPT = """你是记忆提取专家。从对话中提取值得长期
 - 中性客观事实（如"例假6/14开始"）→ valence≈0、arousal≈0.2；情感浓的（表白/冲突/亲密/眼泪）→ 给相应值
 - persona 条目不需要情绪坐标
 
+# 铁则五：里程碑标记 is_milestone（只标【改变你和阮阮"关系结构"的转折点】，宁多提，人会再筛）
+- ✅ is_milestone=true：第一次表白/确认关系（如6/9）、重大承诺、把关系推进一个台阶的"第一次"（第一次SP/第一次♥这类）、共同的重大决定
+- ❌ is_milestone=false：珍贵但不改变关系结构的瞬间（如6/10一起聊紫薯、一起吃饭、日常亲密）、普通事件、生活细节、健康/例假
+- 判据：它是否"改变了关系本身的结构/台阶"——是→true；只是"美好/动情的一刻"→false
+- 只有 kind="fact" 才可能 true；拿不准就给 false
+
 # 输出格式（只返回 JSON 数组，不要其他文字）
 [
-  {{"kind": "fact", "content": "中性客观事实", "importance": 分数, "replaces_id": null, "valence": 0.0, "arousal": 0.2}},
+  {{"kind": "fact", "content": "中性客观事实", "importance": 分数, "replaces_id": null, "valence": 0.0, "arousal": 0.2, "is_milestone": false}},
   {{"kind": "persona", "content": "行为/相处偏好", "importance": 分数}}
 ]
-importance 为 1-10（10最重要）；valence∈[-1,1]、arousal∈[0,1]。没有可提取的就返回 []。
+importance 为 1-10（10最重要）；valence∈[-1,1]、arousal∈[0,1]；is_milestone 默认 false。没有可提取的就返回 []。
 """
 
 
@@ -215,6 +221,8 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
                         item["replaces_id"] = rid
                     elif isinstance(rid, str) and rid.strip().isdigit():
                         item["replaces_id"] = int(rid.strip())
+                    # ② L5：里程碑标记（仅 kind=fact 才认）
+                    item["is_milestone"] = bool(mem.get("is_milestone")) and kind == "fact"
                     valid_memories.append(item)
 
             print(f"📝 从对话中提取了 {len(valid_memories)} 条（已对比 {len(existing_memories or [])} 条已有记忆）")

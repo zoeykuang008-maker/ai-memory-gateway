@@ -1944,6 +1944,32 @@ function _togglePartitionWindow(trigger) {
     if (el) el.style.display = trigger === 'time' ? '' : 'none';
 }
 
+// ② L5根基：待审里程碑候选（机器提，确认/忽略；确认追加进 l5Foundation 正文）
+async function loadL5Candidates() {
+    const box = document.getElementById('l5-candidates');
+    if (!box) return;
+    try {
+        const data = await fetch('/api/l5-candidates?status=pending').then(r => r.json());
+        const items = data.items || [];
+        if (!items.length) { box.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:6px 0">暂无待审里程碑（聊到改变关系结构的转折点时，会自动提到这里）</div>'; return; }
+        box.innerHTML = '<div style="font-size:13px;color:var(--text-muted);margin:4px 0 6px">待审里程碑（确认 → 追加进下方正文，可再编辑修剪）：</div>' + items.map(it =>
+            '<div style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-bottom:0.5px solid var(--border)">' +
+            '<div class="l5-cand-text" style="flex:1;font-size:13px;line-height:1.5">' + escHtml(it.content) + '</div>' +
+            '<button class="btn btn-success btn-sm" onclick="l5Act(' + it.id + ',\'approve\',this)">确认</button>' +
+            '<button class="btn btn-sm" onclick="l5Act(' + it.id + ',\'ignore\',this)">忽略</button></div>'
+        ).join('');
+    } catch (e) { box.innerHTML = '<div style="color:var(--danger);font-size:13px">加载失败：' + e.message + '</div>'; }
+}
+async function l5Act(id, action, btn) {
+    const row = btn.closest('div');
+    const content = (action === 'approve') ? (row.querySelector('.l5-cand-text')?.textContent || '') : null;
+    try {
+        const data = await fetch('/api/l5-candidates/' + id, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, content }) }).then(r => r.json());
+        if (data.l5_foundation !== undefined) { const el = document.getElementById('set-l5Foundation'); if (el) el.value = data.l5_foundation; }
+        loadL5Candidates();
+    } catch (e) {}
+}
+
 async function loadSettings() {
     try {
         const resp = await fetch('/api/settings');
@@ -1989,6 +2015,9 @@ async function loadSettings() {
         }
         const upEl = document.getElementById('set-userProfile');
         if (upEl) upEl.value = s.userProfile || '';
+        const l5El = document.getElementById('set-l5Foundation');
+        if (l5El) l5El.value = s.l5Foundation || '';
+        loadL5Candidates();
         // REASONING_EFFORT 下拉
         const reEl = document.getElementById('set-REASONING_EFFORT');
         if (reEl) reEl.value = s.REASONING_EFFORT || '';
@@ -2046,6 +2075,8 @@ async function saveSettings() {
     if (promptEl) payload.systemPrompt = promptEl.value;
     const upEl = document.getElementById('set-userProfile');
     if (upEl) payload.userProfile = upEl.value;
+    const l5El = document.getElementById('set-l5Foundation');
+    if (l5El) payload.l5Foundation = l5El.value;
 
     try {
         const resp = await fetch('/api/settings', {

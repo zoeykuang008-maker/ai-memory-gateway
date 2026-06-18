@@ -699,6 +699,16 @@
                     </div>
                 </div>
 
+                <!-- ② L5根基 · 关系里程碑（常驻，小克每轮都读到）-->
+                <div class="card settings-card">
+                    <h3 class="settings-group-title">L5 根基 · 关系里程碑（常驻 · 小克永远记得）</h3>
+                    <div class="settings-field">
+                        <small class="form-hint">只放<b>定义你俩关系的转折点</b>（不是事件流水）。小克每轮都攥着它、不靠检索命中。机器只往「待审」队列加，你<b>确认 / 编辑 / 忽略</b>后才进正文；下面这块就是小克实际读到的 L5（≤500 字为宜）。</small>
+                        <div id="l5-candidates" style="margin:8px 0"></div>
+                        <textarea id="set-l5Foundation" class="textarea" rows="8" placeholder="关系里程碑（每行一条，例如：- 2026-06-09 确认关系 / 第一次表白…）"></textarea>
+                    </div>
+                </div>
+
                 <!-- 保存按钮 -->
                 <div style="text-align:center; padding:24px 0 40px;">
                     <button class="btn btn-primary btn-lg" onclick="saveSettings()" id="save-settings-btn" style="min-width:200px;">保存设置</button>
@@ -707,6 +717,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=4.0-p1"></script>
+    <script src="/static/js/dashboard.js?v=4.1-l5"></script>
 </body>
 </html>
