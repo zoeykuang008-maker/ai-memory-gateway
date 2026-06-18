@@ -997,7 +997,7 @@ async def search_memories(query: str, limit: int = 10):
 
         sql = f"""
             SELECT
-                id, content, importance, created_at, mw_meta,
+                id, content, importance, created_at, mw_meta, valence, arousal,
                 ({whit_expr}) AS whit,
                 ({WEIGHT_KEYWORD} * ({whit_expr}) / {sum_w:.4f}) AS kw_score,
                 (
