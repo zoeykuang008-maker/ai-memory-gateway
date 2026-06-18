@@ -1072,7 +1072,7 @@ async def search_memories(query: str, limit: int = 10):
         if results:
             print(f"🔍 '{query}' → 留{_keep_kw[:8]} 丢{_drop_kw[:8]} → 命中 {len(results)} 条" + (f"（过滤 {filtered} 低分）" if filtered else ""))
             for r in results[:3]:
-                print(f"   📌 [score={r['score']:.3f}] (imp={r['importance']}) {r['content'][:50]}...")
+                print(f"   📌 [score={r['score']:.3f}] (imp={r['importance']}) {(r['content'] or '')[:50]}...")
             ids = [r["id"] for r in results]
             await conn.execute(
                 "UPDATE memories SET last_accessed = NOW() WHERE id = ANY($1::int[])",
@@ -1218,6 +1218,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
                            1 - (embedding <=> $1::vector) as similarity
                     FROM memories
                     WHERE embedding IS NOT NULL AND is_active = TRUE
+                      AND content IS NOT NULL AND btrim(content) <> ''
                     ORDER BY embedding <=> $1::vector
                     LIMIT $2
                 """, vec_str, limit * 3)
@@ -1227,6 +1228,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
                 all_mem = await conn.fetch("""
                     SELECT id, content, importance, created_at, embedding_json
                     FROM memories WHERE embedding_json IS NOT NULL AND is_active = TRUE
+                      AND content IS NOT NULL AND btrim(content) <> ''
                 """)
                 
                 scored = []
@@ -1315,7 +1317,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             kw_tag = f"关键词 {keywords[:6]}" if keywords else "无关键词"
             print(f"🔍 {mode_tag}搜索 '{query}' → {kw_tag} → 命中 {len(results)} 条" + (f"（过滤 {filtered} 条低分）" if filtered else ""))
             for r in results[:3]:
-                print(f"   📌 [score={r['score']:.3f}] (kw={r['hit_count']}, sim={r['similarity']:.2f}, imp={r['importance']}) {r['content'][:60]}...")
+                print(f"   📌 [score={r['score']:.3f}] (kw={r['hit_count']}, sim={r['similarity']:.2f}, imp={r['importance']}) {(r['content'] or '')[:60]}...")
             
             ids = [r["id"] for r in results]
             await conn.execute(

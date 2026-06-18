@@ -459,7 +459,10 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
                     date_str = f"[{local_dt.strftime('%Y-%m-%d')}] "
                 except:
                     date_str = f"[{str(mem['created_at'])[:10]}] "
-            memory_lines.append(f"- {date_str}{mem['content']}")
+            _c = (mem.get('content') or '').strip()
+            if not _c:
+                continue  # 空 content 兜底：跳过（双保险，绝不让空行崩注入）
+            memory_lines.append(f"- {date_str}{_c}")
         memory_text = "\n".join(memory_lines)
         
         enhanced_prompt = f"""{persona}
@@ -1081,7 +1084,10 @@ async def build_memory_text(user_message: str) -> str:
                     _txt = (f"【回忆摘要 {_t}】" if _t else "") + ((mw.get("summary") or "").strip() or (mw.get("body") or "").strip())
                 memory_lines.append(f"- {date_str}{_txt}{_feel}")
             else:  # 普通事实记忆：本就短，原样
-                memory_lines.append(f"- {date_str}{mem['content']}{_feel}")
+                _c = (mem.get('content') or '').strip()
+                if not _c:
+                    continue  # 空 content 兜底：跳过（检索已排除，这里双保险，绝不让空行崩注入）
+                memory_lines.append(f"- {date_str}{_c}{_feel}")
 
         print(f"📚 注入 {len(memories)} 条记忆（全文资格={top_full_eligible}, top={top_score:.3f}/2nd={second_score:.3f}）")
         header = "【从过往对话中检索到的相关记忆】（这是你记得的背景，自然融进回应，别整段复述、别像念稿）\n"
