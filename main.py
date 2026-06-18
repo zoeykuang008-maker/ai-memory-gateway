@@ -2211,6 +2211,85 @@ async def api_backfill_explicit(request: Request):
     return {"dry_run": dry_run, "candidates": len(candidates), "tagged_explicit": tagged_true, "samples": samples}
 
 
+@app.post("/api/memories/revive-dry")
+async def api_revive_dry(request: Request):
+    """③-3 复活干碎片 DRY-RUN（只读·不写）：取活跃线某天原文 → 铁则一(EXTRACTION_PROMPT)重提取
+    → 返回 revived 候选(带情绪/现场/里程碑) + 该天现有"干碎片"对照，供审质感。不调用 save_memory。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    sid = get_active_session_id()
+    if not sid:
+        return {"error": "无活跃对话线"}
+    date_s = (body.get("date") or "").strip()
+    max_msgs = int(body.get("max_msgs", 60))
+
+    rows = await get_conversation_messages(sid, limit=10000)
+    if not rows:
+        return {"error": "无对话"}
+
+    def _local_date(ts):
+        try:
+            if getattr(ts, "tzinfo", None) is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return str((ts + timedelta(hours=TIMEZONE_HOURS)).date())
+        except Exception:
+            return None
+
+    from collections import OrderedDict
+    by_date = OrderedDict()
+    for m in rows:
+        d = _local_date(m.get("created_at"))
+        if d:
+            by_date.setdefault(d, []).append(m)
+    if not by_date:
+        return {"error": "无可用日期"}
+    if not date_s:
+        date_s = next(iter(by_date))  # 最早一天
+    day_msgs = by_date.get(date_s, [])
+    if not day_msgs:
+        return {"error": f"{date_s} 无对话", "available_dates": list(by_date.keys())[:30]}
+
+    window = day_msgs[:max_msgs]
+    msgs_for_extract = [{"role": m.get("role"), "content": (m.get("content") or "")}
+                        for m in window if (m.get("content") or "").strip()]
+
+    all_mem = await get_all_memories_detail()
+    existing = [{"id": x["id"], "content": x["content"]} for x in all_mem if x.get("content")]
+
+    def _is_dry(x):
+        try:
+            v = float(x.get("valence") or 0); a = float(x.get("arousal") or 0.2)
+        except Exception:
+            return False
+        return abs(v) < 0.01 and abs(a - 0.2) < 0.02
+    dry_on_day = []
+    for x in all_mem:
+        if x.get("source_session") == sid and _is_dry(x) and _local_date(x.get("created_at")) == date_s:
+            dry_on_day.append({"id": x["id"], "content": (x.get("content") or "")[:80]})
+
+    revived = await extract_memories(msgs_for_extract, existing_memories=existing)
+
+    return {
+        "dry_run": True,
+        "active_session": sid,
+        "date": date_s,
+        "window_msgs": len(msgs_for_extract),
+        "available_dates": list(by_date.keys())[:30],
+        "existing_dry_fragments_on_day": dry_on_day[:30],
+        "revived_count": len(revived),
+        "revived_candidates": [
+            {"content": r.get("content"), "kind": r.get("kind"),
+             "valence": r.get("valence"), "arousal": r.get("arousal"),
+             "is_milestone": r.get("is_milestone"), "is_explicit": r.get("is_explicit")}
+            for r in revived
+        ],
+    }
+
+
 # ============================================================
 # 三层记忆架构：整理 / 合并 / 升级 / 统计
 # ============================================================
