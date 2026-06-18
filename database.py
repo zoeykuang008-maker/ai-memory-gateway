@@ -779,7 +779,7 @@ async def get_explicit_backfill_candidates(keywords: list, ids: list = None, lim
         params = list(keywords)
         params.append(limit)
         rows = await conn.fetch(
-            f"SELECT id, content FROM memories WHERE is_active = TRUE AND content IS NOT NULL AND ({where}) "
+            f"SELECT id, content FROM memories WHERE is_active = TRUE AND mw_meta IS NULL AND content IS NOT NULL AND ({where}) "
             f"ORDER BY importance DESC, created_at DESC LIMIT ${len(keywords)+1}",
             *params,
         )

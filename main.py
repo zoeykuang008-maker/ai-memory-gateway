@@ -473,9 +473,10 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
         _explicit_hits = []
         if await get_explicit_redact_enabled():
             _flags = await get_memories_explicit_flags([m["id"] for m in memories])
-            _explicit_hits = [m for m in memories if _flags.get(m["id"])]
+            _explicit_hits = [m for m in memories if _flags.get(m["id"]) and not m.get("mw_meta")]
             if _explicit_hits:
-                memories = [m for m in memories if not _flags.get(m["id"])]
+                _ex_ids = {m["id"] for m in _explicit_hits}
+                memories = [m for m in memories if m["id"] not in _ex_ids]
 
         # 情绪①-第二步：把本轮命中的旧记忆朝当前心情挪 ≤0.1（fire-and-forget，不阻塞回复；仅聊天注入路径触发）
         if MOOD_DRIFT_ENABLED:
@@ -1170,9 +1171,10 @@ async def build_memory_text(user_message: str) -> str:
         _explicit_hits = []
         if await get_explicit_redact_enabled():
             _flags = await get_memories_explicit_flags([m["id"] for m in memories])
-            _explicit_hits = [m for m in memories if _flags.get(m["id"])]
+            _explicit_hits = [m for m in memories if _flags.get(m["id"]) and not m.get("mw_meta")]
             if _explicit_hits:
-                memories = [m for m in memories if not _flags.get(m["id"])]
+                _ex_ids = {m["id"] for m in _explicit_hits}
+                memories = [m for m in memories if m["id"] not in _ex_ids]
                 print(f"🔞 is_explicit 收敛：剔除 {len(_explicit_hits)} 条露骨原文，改注入定向指令")
 
         # 情绪①-第二步：把本轮命中的旧记忆朝当前心情挪 ≤0.1（fire-and-forget，不阻塞回复；仅聊天注入路径触发）
