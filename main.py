@@ -445,9 +445,9 @@ MW_FULLBODY_MIN_SCORE = float(os.getenv("MW_FULLBODY_MIN_SCORE", "0.65"))
 MW_FULLBODY_MIN_MARGIN = float(os.getenv("MW_FULLBODY_MIN_MARGIN", "0.10"))
 
 
-async def build_system_prompt_with_memories(user_message: str) -> str:
+async def build_system_prompt_with_memories(user_message: str, drift: bool = True) -> str:
     """
-    构建带记忆的 system prompt
+    构建带记忆的 system prompt（drift=False 时只读，不触发心情漂移；诊断/层视图用）
     1. 用用户消息搜索相关记忆
     2. 格式化成文本拼接到人设后面
     """
@@ -479,7 +479,7 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
                 memories = [m for m in memories if m["id"] not in _ex_ids]
 
         # 情绪①-第二步：把本轮命中的旧记忆朝当前心情挪 ≤0.1（fire-and-forget，不阻塞回复；仅聊天注入路径触发）
-        if MOOD_DRIFT_ENABLED:
+        if drift and MOOD_DRIFT_ENABLED:
             try:
                 asyncio.create_task(apply_mood_drift(
                     [m["id"] for m in memories],
@@ -838,6 +838,7 @@ async def build_partitioned_messages(
     all_messages: list,
     base_prompt: str,
     user_message: str,
+    drift: bool = True,
 ) -> list:
     """
     分区缓存模式：构建带breakpoint的messages数组。
@@ -977,7 +978,7 @@ async def build_partitioned_messages(
                 parts.append(_l2blk)
 
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
-            mem_text = await build_memory_text(user_message)
+            mem_text = await build_memory_text(user_message, drift=drift)
             if mem_text:
                 parts.append(mem_text)
 
@@ -1004,6 +1005,7 @@ async def _build_basic_cached(
     base_prompt: str,
     user_message: str,
     current_user_msg: dict,
+    drift: bool = True,
 ) -> list:
     """基础版prompt caching（历史不够分区时的降级模式）"""
     result = []
@@ -1032,7 +1034,7 @@ async def _build_basic_cached(
                 parts.append(_l2blk)
 
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
-            mem_text = await build_memory_text(user_message)
+            mem_text = await build_memory_text(user_message, drift=drift)
             if mem_text:
                 parts.append(mem_text)
 
@@ -1152,8 +1154,8 @@ async def apply_explicit_gate(memories: list, user_message: str, force_intimate=
                   "kept": len(kept), "dropped": len(dropped)}
 
 
-async def build_memory_text(user_message: str) -> str:
-    """搜索记忆并格式化为注入文本（分区缓存模式用）。
+async def build_memory_text(user_message: str, drift: bool = True) -> str:
+    """搜索记忆并格式化为注入文本（分区缓存模式用）。drift=False 时只读（诊断/层视图用，不触发心情漂移）。
     回忆墙条目默认只注入结构化摘要(mw_meta.summary)；仅当某条明显最强命中时才附全文 body。"""
     if MAX_MEMORIES_INJECT <= 0:
         return ""
@@ -1178,7 +1180,7 @@ async def build_memory_text(user_message: str) -> str:
                 print(f"🔞 is_explicit 收敛：剔除 {len(_explicit_hits)} 条露骨原文，改注入定向指令")
 
         # 情绪①-第二步：把本轮命中的旧记忆朝当前心情挪 ≤0.1（fire-and-forget，不阻塞回复；仅聊天注入路径触发）
-        if MOOD_DRIFT_ENABLED:
+        if drift and MOOD_DRIFT_ENABLED:
             try:
                 asyncio.create_task(apply_mood_drift(
                     [m["id"] for m in memories],
@@ -2998,7 +3000,7 @@ async def api_debug_built_prompt(request: Request):
         "sample_message": sample,
     }
     try:
-        part_msgs = await _build_basic_cached([], persona + up_block + _compose_l5_block(await get_l5_foundation()) + "\n\n" + MEMORY_GUIDANCE, sample, {"role": "user", "content": sample})
+        part_msgs = await _build_basic_cached([], persona + up_block + _compose_l5_block(await get_l5_foundation()) + "\n\n" + MEMORY_GUIDANCE, sample, {"role": "user", "content": sample}, drift=False)
         ptxt, psys = _sys_text(part_msgs)
         last = part_msgs[-1]["content"] if part_msgs else ""
         out["partition_cache_mode"] = {
@@ -3013,7 +3015,7 @@ async def api_debug_built_prompt(request: Request):
     except Exception as e:
         out["partition_cache_mode"] = {"error": str(e)}
     try:
-        enhanced = await build_system_prompt_with_memories(sample) if (MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED) else (await get_system_prompt())
+        enhanced = await build_system_prompt_with_memories(sample, drift=False) if (MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED) else (await get_system_prompt())
         enhanced = (enhanced or "") + up_block + _compose_l5_block(await get_l5_foundation())
         out["non_cache_mode"] = _assert(enhanced)
     except Exception as e:
