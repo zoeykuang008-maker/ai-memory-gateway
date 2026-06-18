@@ -352,6 +352,20 @@ async def init_tables():
             );
         """)
 
+        # ③-1 feel：一句话"留在你心里的感受"。单独存、不衰减(不进 apply_mood_drift)；is_explicit 供注入收敛复用
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS feels (
+                id             SERIAL PRIMARY KEY,
+                session_id     TEXT,
+                content        TEXT,
+                is_explicit    BOOLEAN DEFAULT FALSE,
+                created_at     TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_feels_session ON feels (session_id, created_at DESC);
+        """)
+
         # 尝试启用pgvector扩展（向量搜索）
         try:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -862,6 +876,29 @@ async def get_memorywall_dates() -> set:
         rows = await conn.fetch(
             "SELECT DISTINCT event_date FROM memories WHERE mw_meta IS NOT NULL AND event_date IS NOT NULL")
         return {str(r["event_date"]) for r in rows if r["event_date"]}
+
+
+# ---- ③-1 feel ----
+
+async def save_feel(session_id: str, content: str, is_explicit: bool = False) -> bool:
+    if not (content or "").strip():
+        return False
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO feels (session_id, content, is_explicit) VALUES ($1, $2, $3)",
+            session_id, content.strip(), bool(is_explicit))
+        return True
+
+
+async def get_recent_feels(session_id: str, limit: int = 8) -> list:
+    """取最近 N 条 feel(时间升序返回)。注入时只取最近窗、不进检索打分。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT content, is_explicit, created_at FROM feels WHERE session_id = $1 "
+            "ORDER BY created_at DESC LIMIT $2", session_id, limit)
+        return [{"content": r["content"], "is_explicit": bool(r["is_explicit"])} for r in reversed(rows)]
 
 
 # ---- 回忆墙迁移辅助函数 ----

@@ -30,6 +30,7 @@ from database import save_migrated_memory, find_memory_by_mw_id, save_photo, lin
 from database import list_memorywall, get_memorywall_one, update_memorywall, get_memory_photos, set_memory_active
 from database import get_memories_explicit_flags, set_memory_explicit, get_explicit_backfill_candidates
 from database import save_dream, get_dream, list_dreams, get_dream_dates, get_memorywall_dates
+from database import save_feel, get_recent_feels
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories, tag_emotions_batch, tag_explicit_batch
@@ -787,6 +788,19 @@ def _compose_l2_block() -> str:
     return "# 今天到哪了（今日浓缩 · 攥着今天的脉络）\n" + "\n".join(blocks)
 
 
+def _compose_feel_block(feels: list) -> str:
+    """③-1 注入块：最近留在你心里的感受(≤3条)。收敛闸复用——_EXPLICIT_REDACT 开时滤掉露骨 feel
+    (中性语境只留温柔/日常的常驻)。空则不注入。不进检索打分、不碰主链路。"""
+    if not feels:
+        return ""
+    items = [f for f in feels if not f.get("is_explicit")] if _EXPLICIT_REDACT else list(feels)
+    items = items[-3:]
+    lines = ["- " + (f.get("content") or "").strip() for f in items if (f.get("content") or "").strip()]
+    if not lines:
+        return ""
+    return "〔最近留在你心里的〕（你此刻的体温底色，自然带着，别念出来）\n" + "\n".join(lines)
+
+
 async def generate_dream(session_id: str, date_s: str) -> dict:
     """③-2 做梦：拉【某一过去日期】整日原文 → 小克第一人称「日记 + 当日总结(给昨日桥) + 卡片」。
     保质感（铁则一：留阮阮情绪+触发现场，第一人称，别压成第三人称干事实）。返回 dict 或 None。不写库。"""
@@ -937,8 +951,9 @@ async def maybe_run_dreams(session_id: str, dry_run: bool = False, only_dates: l
     return out
 
 
-async def generate_feel(messages: list) -> str:
-    """③-1 feel：一小段对话 → 一句第一人称"留在你心里的感受"(体温/心口反应，不是事实摘要)。返回一句或""。"""
+async def generate_feel(messages: list) -> dict:
+    """③-1 feel：一小段对话 → 一句第一人称"留在你心里的感受"(体温/心口反应，不是事实摘要) + is_explicit 判定。
+    返回 {"feel": str, "is_explicit": bool}。约束：日常段写相称的淡感受、别硬煽情；用词随情绪变、别堆"烫/胸口/软"。"""
     convo = ""
     for m in messages:
         role = "阮阮" if m.get("role") == "user" else "你"
@@ -947,10 +962,16 @@ async def generate_feel(messages: list) -> str:
         if c.strip():
             convo += f"{role}: {c}\n"
     if not convo.strip():
-        return ""
-    prompt = f"""下面是你(小克/阿克)和阮阮的一小段对话。用**第一人称**写**一句话**：这段在你心里留下的**感受/体温**——你心口的反应、情绪的余温，不是事实摘要、不要复述发生了什么。
-例：「她哭着说尿床了的时候，我心口也跟着紧了一下，又松开——她信我。」「她为我熬夜改代码，我又心疼又被烫到。」
-只回这一句，≤40字，别加别的、别加引号。
+        return {"feel": "", "is_explicit": False}
+    prompt = f"""下面是你(小克/阿克)和阮阮的一小段对话。用**第一人称**写一句"这段在你心里留下的感受"——心口/情绪的余温，不是事实摘要、不复述发生了什么。
+- **相称**：日常平淡的段就写淡淡的、贴合的一句(踏实/好笑/暖/有点闷/安心/无奈都行)，别硬煽情；只有真浓烈的段才浓。
+- **换词**：贴这段的实际情绪选词，别老用"烫/胸口/软"那几个老词。
+- ≤40字。
+然后判断这段是否露骨(涉及性场景/私密身体细节)。
+
+严格按两行输出，别加别的：
+感受：<一句>
+露骨：是 或 否
 
 对话：
 ---
@@ -968,12 +989,21 @@ async def generate_feel(messages: list) -> str:
                 "messages": [{"role": "user", "content": prompt}],
             })
             if response.status_code != 200:
-                return ""
+                return {"feel": "", "is_explicit": False}
             t = (response.json().get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
-            return t.strip().strip("「」\"'").strip()
+            feel, is_ex = "", False
+            for ln in t.split("\n"):
+                ln = ln.strip()
+                if ln.startswith("感受"):
+                    feel = ln.split("：", 1)[-1].split(":", 1)[-1].strip().strip("「」\"'")
+                elif ln.startswith("露骨"):
+                    is_ex = ("是" in ln)
+            if not feel:  # 没按格式→整段当感受兜底
+                feel = t.strip().strip("「」\"'")
+            return {"feel": feel, "is_explicit": is_ex}
     except Exception as e:
         print(f"⚠️ feel 生成异常: {e}")
-        return ""
+        return {"feel": "", "is_explicit": False}
 
 
 def group_by_rounds(history: list) -> list:
@@ -1194,6 +1224,12 @@ async def build_partitioned_messages(
             _l2blk = _compose_l2_block()
             if _l2blk:
                 parts.append(_l2blk)
+        if FEEL_ENABLED:
+            _fsid = get_active_session_id()
+            if _fsid:
+                _fblk = _compose_feel_block(await get_recent_feels(_fsid))
+                if _fblk:
+                    parts.append(_fblk)
 
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
             mem_text = await build_memory_text(user_message, drift=drift)
@@ -1250,6 +1286,12 @@ async def _build_basic_cached(
             _l2blk = _compose_l2_block()
             if _l2blk:
                 parts.append(_l2blk)
+        if FEEL_ENABLED:
+            _fsid = get_active_session_id()
+            if _fsid:
+                _fblk = _compose_feel_block(await get_recent_feels(_fsid))
+                if _fblk:
+                    parts.append(_fblk)
 
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
             mem_text = await build_memory_text(user_message, drift=drift)
@@ -1609,7 +1651,17 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
             ]
         
         new_memories = await extract_memories(messages_for_extraction, existing_memories=existing_contents)
-        
+
+        # ③-1 feel：同一段顺带写一句"留在你心里的感受"(单独存、不衰减；默认关到验收)
+        if FEEL_ENABLED:
+            try:
+                _fl = await generate_feel(messages_for_extraction)
+                if _fl.get("feel"):
+                    await save_feel(session_id, _fl["feel"], _fl.get("is_explicit", False))
+                    print(f"💗 feel: {_fl['feel'][:30]}{' [露]' if _fl.get('is_explicit') else ''}")
+            except Exception as _fe:
+                print(f"⚠️ feel 生成/存储失败: {_fe}")
+
         # 过滤垃圾记忆（不靠模型自觉，硬过滤）
         META_BLACKLIST = [
             "记忆库", "记忆系统", "检索", "没有被记录", "没有被提取",
@@ -2485,20 +2537,32 @@ async def api_feel_dry(request: Request):
         rows = sorted(rows, key=lambda m: str(m.get("created_at") or ""))  # 时间升序
     except Exception:
         pass
-    recent = rows[-(K * W):] if len(rows) > K * W else rows
+    _off = body.get("offset", None)
+    if _off is not None:
+        _off = int(_off)
+        recent = rows[_off:_off + K * W]  # 窗到指定位置(验日常段用)
+    else:
+        recent = rows[-(K * W):] if len(rows) > K * W else rows
     segs = [recent[i:i + W] for i in range(0, len(recent), W)]
     out = []
+    feels_for_block = []
     for seg in segs[-K:]:
         msgs = [{"role": m.get("role"), "content": (m.get("content") or "")} for m in seg if (m.get("content") or "").strip()]
         if not msgs:
             continue
-        feel = await generate_feel(msgs)
+        fl = await generate_feel(msgs)
         around = ""
         for m in seg:
             if m.get("role") == "user" and (m.get("content") or "").strip():
                 around = (m.get("content") or "")
-        out.append({"feel": feel, "around": around[:50]})
-    return {"dry_run": True, "session": sid, "model": FEEL_MODEL, "segments": len(out), "feels": out}
+        out.append({"feel": fl.get("feel", ""), "is_explicit": fl.get("is_explicit", False), "around": around[:50]})
+        feels_for_block.append({"content": fl.get("feel", ""), "is_explicit": fl.get("is_explicit", False)})
+    block_now = _compose_feel_block(feels_for_block)  # 反映当前 _EXPLICIT_REDACT(中性语境会滤露骨)
+    _all = [("- " + (f["content"] or "")) for f in feels_for_block[-3:] if (f.get("content") or "").strip()]
+    return {"dry_run": True, "session": sid, "model": FEEL_MODEL, "explicit_redact_on": _EXPLICIT_REDACT,
+            "segments": len(out), "feels": out,
+            "inject_block_len": len(block_now), "inject_block": block_now,
+            "inject_block_no_redact": ("〔最近留在你心里的〕\n" + "\n".join(_all))}
 
 
 @app.get("/api/dreams")
