@@ -85,6 +85,10 @@ PERSONA_SUGGESTION_MIN_IMPORTANCE = int(os.getenv("PERSONA_SUGGESTION_MIN_IMPORT
 CACHE_PARTITION_ENABLED = os.getenv("CACHE_PARTITION_ENABLED", "false").lower() == "true"
 CACHE_PARTITION_X = int(os.getenv("CACHE_PARTITION_X", "15"))
 CACHE_SUMMARY_MODEL = os.getenv("CACHE_SUMMARY_MODEL", "anthropic/claude-haiku-4.5")
+
+# ② L2今日（非缓存当前轮注入；后台每 N 轮刷一次今日浓缩）
+L2_TODAY_ENABLED = os.getenv("L2_TODAY_ENABLED", "true").lower() == "true"
+L2_REFRESH_N = int(os.getenv("L2_REFRESH_N", "5"))
 CACHE_PARTITION_TRIGGER = os.getenv("CACHE_PARTITION_TRIGGER", "rounds")  # rounds=按轮次 | time=按时间窗口
 CACHE_PARTITION_WINDOW = int(os.getenv("CACHE_PARTITION_WINDOW", "30"))  # 时间窗口（分钟），仅 trigger=time 时生效
 PARTITION_SESSION_ID = os.getenv("PARTITION_SESSION_ID", "")
@@ -97,6 +101,8 @@ TIMEZONE_HOURS = int(os.getenv("TIMEZONE_HOURS", "8"))
 
 # 轮次计数器
 _round_counter = 0
+# ② L2今日状态（非缓存当前轮注入；后台每N轮刷新；启动时从 gateway_config 恢复）
+_l2_state = {"date": None, "today": "", "bridge": ""}
 
 # 强制流式传输（部分客户端不发stream=true导致thinking数据丢失，开启后强制所有请求走流式）
 FORCE_STREAM = os.getenv("FORCE_STREAM", "false").lower() == "true"
@@ -253,6 +259,14 @@ async def lifespan(app: FastAPI):
             await ensure_token_usage_table()
             count = await get_all_memories_count()
             print(f"✅ 记忆系统已启动，当前记忆数量：{count}")
+
+            # ② L2今日：启动时从 gateway_config 恢复浓缩状态
+            try:
+                _l2_state["today"] = await get_gateway_config("l2_today", "") or ""
+                _l2_state["date"] = (await get_gateway_config("l2_today_date", "")) or None
+                _l2_state["bridge"] = await get_gateway_config("l2_bridge", "") or ""
+            except Exception:
+                pass
             
             # 从数据库恢复面板配置（重启后保持Dashboard修改过的值）
             try:
@@ -594,6 +608,108 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
         return ""
 
 
+# ============================================================
+# ② L2今日浓缩（保质感；非缓存当前轮注入；后台每 N 轮刷一次）
+# ============================================================
+async def generate_today_digest(session_id: str) -> str:
+    """把【今天】的对话压成约 800-1000字"今天到哪了"，保质感（接铁则一：留阮阮情绪+触发现场，别压成第三人称干事实）。"""
+    if not session_id:
+        return ""
+    try:
+        rows = await get_conversation_messages(session_id, limit=10000)
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    today = (datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)).date()
+    convo = ""
+    for m in rows:
+        ts = m.get("created_at")
+        if ts is not None:
+            try:
+                if getattr(ts, "tzinfo", None) is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if (ts + timedelta(hours=TIMEZONE_HOURS)).date() != today:
+                    continue
+            except Exception:
+                pass
+        role = "阮阮" if m.get("role") == "user" else "你"
+        c = m.get("content")
+        c = c if isinstance(c, str) else str(c)
+        if c.strip():
+            convo += f"{role}: {c}\n"
+    if not convo.strip():
+        return ""
+    prompt = f"""把【今天】你和阮阮的对话浓缩成约 800-1000 字的"今天到哪了"，让你随时攥着今天的脉络。
+最重要：
+- 保留阮阮的情绪和触发现场——她什么时候笑了/哭了/累了/气了/动情了，以及**因为什么**（哪句话、哪个动作、什么场景），别压成第三人称干事实流水。
+- 保留你俩的语气和质感，按时间脉络写今天的情绪起伏。
+- 结尾点出她**此刻的状态**（累不累/开心不开心/在忙什么/身体怎样）。
+- 像你自己记得，不是旁观者写报告。
+
+今天的对话：
+---
+{convo}
+---
+今天到哪了："""
+    try:
+        headers = {"Authorization": f"Bearer {get_memory_api_key()}", "Content-Type": "application/json"}
+        if "openrouter" in API_BASE_URL:
+            headers["HTTP-Referer"] = EXTRA_REFERER
+            headers["X-Title"] = EXTRA_TITLE
+        async with httpx.AsyncClient(timeout=90) as client:
+            response = await client.post(API_BASE_URL, headers=headers, json={
+                "model": CACHE_SUMMARY_MODEL,
+                "max_tokens": 1500,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+            if response.status_code == 200:
+                data = response.json()
+                if "choices" in data:
+                    d = data["choices"][0]["message"]["content"].strip()
+                    print(f"📝 L2今日浓缩生成: {len(d)}字")
+                    return d
+        print(f"⚠️ L2 digest 失败: HTTP {response.status_code}")
+        return ""
+    except Exception as e:
+        print(f"⚠️ L2 digest 异常: {e}")
+        return ""
+
+
+async def refresh_l2(session_id: str) -> str:
+    """生成并存今日浓缩；跨天则把昨日 today 转成一句桥（临时，L3 上线后撤）。"""
+    today_s = str((datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)).date())
+    if _l2_state.get("date") and _l2_state["date"] != today_s and (_l2_state.get("today") or "").strip():
+        prev = _l2_state["today"].strip()
+        _l2_state["bridge"] = (prev.split("。")[0][:120] or prev[:120])
+        _l2_state["today"] = ""
+    digest = await generate_today_digest(session_id)
+    if digest:
+        _l2_state["date"] = today_s
+        _l2_state["today"] = digest
+        try:
+            await set_gateway_config("l2_today", digest)
+            await set_gateway_config("l2_today_date", today_s)
+            await set_gateway_config("l2_bridge", _l2_state.get("bridge", ""))
+        except Exception:
+            pass
+    return digest
+
+
+def _compose_l2_block() -> str:
+    """L2今日块：注入到非缓存的当前轮（每轮都在、每N轮刷一次）。空则不注入。"""
+    blocks = []
+    b = (_l2_state.get("bridge") or "").strip()
+    if b:
+        blocks.append(f"〔昨日〕{b}")
+    t = (_l2_state.get("today") or "").strip()
+    if t:
+        blocks.append(t)
+    if not blocks:
+        return ""
+    return "# 今天到哪了（今日浓缩 · 攥着今天的脉络）\n" + "\n".join(blocks)
+
+
 def group_by_rounds(history: list) -> list:
     """
     按逻辑轮分组：每个user消息开始一轮，到下一个user前结束。
@@ -807,6 +923,10 @@ async def build_partitioned_messages(
     if current_user_msg:
         _last_ts = history[-1].get('created_at') if history else None
         parts = [build_time_injection(_last_ts)]
+        if L2_TODAY_ENABLED:
+            _l2blk = _compose_l2_block()
+            if _l2blk:
+                parts.append(_l2blk)
 
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
             mem_text = await build_memory_text(user_message)
@@ -858,6 +978,10 @@ async def _build_basic_cached(
     if current_user_msg:
         _last_ts = history[-1].get('created_at') if history else None
         parts = [build_time_injection(_last_ts)]
+        if L2_TODAY_ENABLED:
+            _l2blk = _compose_l2_block()
+            if _l2blk:
+                parts.append(_l2blk)
 
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
             mem_text = await build_memory_text(user_message)
@@ -1058,7 +1182,14 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
             return
         
         _round_counter += 1
-        
+
+        # ② L2今日：每 N 轮刷新今日浓缩（独立于提取间隔，后台不阻塞回复）
+        if L2_TODAY_ENABLED and L2_REFRESH_N > 0 and (_round_counter % L2_REFRESH_N == 0):
+            try:
+                asyncio.create_task(refresh_l2(session_id))
+            except Exception as _le:
+                print(f"⚠️ L2刷新调度失败: {_le}")
+
         if MEMORY_EXTRACT_INTERVAL > 1 and (_round_counter % MEMORY_EXTRACT_INTERVAL != 0):
             print(f"⏭️  轮次 {_round_counter}，跳过记忆提取（每 {MEMORY_EXTRACT_INTERVAL} 轮提取一次）")
             return
@@ -2427,6 +2558,28 @@ async def api_update_l5_candidate(cand_id: int, request: Request):
         await update_l5_candidate(cand_id, "ignored")
         return {"status": "ok", "ignored": cand_id}
     return JSONResponse(status_code=400, content={"error": "action 必须是 approve 或 ignore"})
+
+
+@app.post("/api/l2/refresh")
+async def api_l2_refresh(request: Request):
+    """② L2今日：手动刷新今日浓缩（默认对活跃会话；返回生成的 digest 供查看/L2视图）。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    sid = (body.get("session_id") or get_active_session_id() or "").strip()
+    digest = await refresh_l2(sid)
+    return {"status": "ok", "session_id": sid, "len": len(digest or ""),
+            "today": _l2_state.get("today", ""), "bridge": _l2_state.get("bridge", "")}
+
+
+@app.get("/api/l2")
+async def api_l2_get():
+    """② L2今日视图：当前注入的今日浓缩 + 昨日桥。"""
+    return {"date": _l2_state.get("date"), "len": len(_l2_state.get("today") or ""),
+            "today": _l2_state.get("today", ""), "bridge": _l2_state.get("bridge", "")}
 
 
 @app.get("/api/persona-suggestions")
