@@ -77,6 +77,14 @@ MOOD_DRIFT_DAILY_CAP = int(os.getenv("MOOD_DRIFT_DAILY_CAP", "3"))      # 每条
 MOOD_RECENT_N = int(os.getenv("MOOD_RECENT_N", "30"))                   # current_mood 的「最近记忆」窗口
 MOOD_DRIFT_SKIP_MEMORYWALL = os.getenv("MOOD_DRIFT_SKIP_MEMORYWALL", "true").lower() == "true"  # 回忆墙豁免漂移+不进基线
 
+# ②/① 露骨记忆语境闸：高 arousal/私密记忆只在「当下也亲密」时放行，中性语境压制（阈值先占位，看完用例再调）
+EXPLICIT_GATE_ENABLED = os.getenv("EXPLICIT_GATE_ENABLED", "false").lower() == "true"  # 先默认关：看完用例认了阈值再在 Zeabur 开
+SENSITIVE_AROUSAL = float(os.getenv("SENSITIVE_AROUSAL", "0.6"))            # ≥此值算敏感/高唤醒 → 触发判别
+EXPLICIT_HARD_AROUSAL = float(os.getenv("EXPLICIT_HARD_AROUSAL", "0.8"))    # ① 硬门：≥此值在非亲密语境直接不注入
+EXPLICIT_PENALTY_LAMBDA = float(os.getenv("EXPLICIT_PENALTY_LAMBDA", "0.5"))  # ② arousal 失配惩罚权重
+EXPLICIT_CLASSIFIER_ENABLED = os.getenv("EXPLICIT_CLASSIFIER_ENABLED", "true").lower() == "true"  # ① 模糊时是否用 haiku 微判当前消息
+EXPLICIT_CLASSIFIER_MODEL = os.getenv("EXPLICIT_CLASSIFIER_MODEL", "") or os.getenv("MEMORY_MODEL", "anthropic/claude-haiku-4.5")
+
 # 人设建议自动生成：开关 + importance 门槛（默认开着但门槛抬高，平凡偏好如"回复别太长"不收；可随时关）
 PERSONA_SUGGESTION_ENABLED = os.getenv("PERSONA_SUGGESTION_ENABLED", "true").lower() == "true"
 PERSONA_SUGGESTION_MIN_IMPORTANCE = int(os.getenv("PERSONA_SUGGESTION_MIN_IMPORTANCE", "7"))
@@ -432,6 +440,11 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
     try:
         memories = await search_memories(user_message, limit=MAX_MEMORIES_INJECT)
 
+        if not memories:
+            return persona
+
+        # ②/① 露骨语境闸（与分区路一致）
+        memories, _gate_dbg = await apply_explicit_gate(memories, user_message)
         if not memories:
             return persona
 
@@ -1026,6 +1039,87 @@ def mood_word(v, a):
     return "紧绷"
 
 
+# ============================================================
+# ②/① 露骨记忆语境闸（高 arousal/私密只在当下也亲密时放行）
+# ============================================================
+EXPLICIT_LEXICON = [
+    "做爱", "上你", "操你", "口交", "肉棒", "高潮", "射了", "舔",
+    "湿了", "硬了", "脱光", "裸", "呻吟", "情欲", "想要你", "干我", "插进",
+]  # 明显露骨词：命中即判当下亲密、跳过 haiku（紧集合、宁缺毋滥；炒菜类暗号靠 haiku 判）
+
+
+async def _llm_intimacy_verdict(user_message: str) -> bool:
+    """门控 haiku 微判：这句话此刻是否处于性/身体亲密语境。仅在「有敏感候选且无露骨词」时被调。"""
+    msg = (user_message or "").strip()[:200]
+    if not msg or not API_KEY:
+        return False
+    prompt = (
+        "你在判断一句聊天消息此刻是否处于『性/身体亲密』语境（用来决定要不要在记忆里调取私密内容）。\n"
+        "注意：很多话题表面是日常（做饭、炒菜、技术、工作），即便曾被当暗号，只要这句话本身在正常聊天就算『否』。\n"
+        "只有当这句话本身明显在调情、求欢、或描述身体/性，才算『是』。\n"
+        "只回一个字符：1=是，0=否。\n\n句子：" + msg
+    )
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(API_BASE_URL, headers={
+                "Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json",
+            }, json={
+                "model": EXPLICIT_CLASSIFIER_MODEL, "max_tokens": 4, "temperature": 0,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+            if r.status_code != 200:
+                print(f"⚠️ 亲密判别请求 {r.status_code}→按中性")
+                return False
+            txt = (r.json().get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+            return txt.startswith("1") or txt.startswith("是")
+    except Exception as e:
+        print(f"⚠️ 亲密判别 haiku 失败→按中性: {e}")
+        return False
+
+
+async def classify_moment_intimacy(user_message: str):
+    """判别『当下是否亲密』→ (intimate: bool, how: str)。词法快判命中露骨词→直接 intimate；
+    否则（模糊）才门控 haiku 微判当前消息意图。"""
+    msg = user_message or ""
+    if any(w in msg for w in EXPLICIT_LEXICON):
+        return True, "lexicon"
+    if not EXPLICIT_CLASSIFIER_ENABLED:
+        return False, "classifier-off→neutral"
+    v = await _llm_intimacy_verdict(msg)
+    return v, ("haiku=1" if v else "haiku=0")
+
+
+async def apply_explicit_gate(memories: list, user_message: str, force_intimate=None, force_run=False):
+    """②/① 露骨语境闸：候选含高 arousal 记忆才判别当下亲密度，
+    再 ② arousal 失配惩罚重排 + ① 非亲密语境硬挡极高 arousal。返回 (memories, debug)。
+    force_intimate 仅供 debug 端点确定性演示两侧用；force_run 让 debug 端点在全局开关关时也能演示。"""
+    if (not EXPLICIT_GATE_ENABLED and not force_run) or not memories:
+        return memories, {"gate": "off"}
+    has_sensitive = any(float(m.get("arousal") or 0) >= SENSITIVE_AROUSAL for m in memories)
+    if not has_sensitive:
+        return memories, {"gate": "skip", "reason": "no-sensitive-candidate"}
+    if force_intimate is not None:
+        intimate, how = bool(force_intimate), "forced"
+    else:
+        intimate, how = await classify_moment_intimacy(user_message)
+    ctx_arousal = 0.85 if intimate else 0.2
+    kept, dropped = [], []
+    for m in memories:
+        a = float(m.get("arousal") or 0)
+        base = float(m.get("score") or 0)
+        m["_adj_score"] = base - EXPLICIT_PENALTY_LAMBDA * max(0.0, a - ctx_arousal)  # ② 单边失配惩罚
+        if (not intimate) and a >= EXPLICIT_HARD_AROUSAL:                              # ① 硬门
+            dropped.append(m)
+            continue
+        kept.append(m)
+    kept.sort(key=lambda x: -float(x.get("_adj_score") or 0))
+    if dropped or not intimate:
+        print(f"🔞 语境闸: intimate={intimate}({how}) 留{len(kept)}挡{len(dropped)} "
+              f"(敏感≥{SENSITIVE_AROUSAL}/硬门≥{EXPLICIT_HARD_AROUSAL}/λ{EXPLICIT_PENALTY_LAMBDA})")
+    return kept, {"gate": "on", "intimate": intimate, "how": how, "ctx_arousal": ctx_arousal,
+                  "kept": len(kept), "dropped": len(dropped)}
+
+
 async def build_memory_text(user_message: str) -> str:
     """搜索记忆并格式化为注入文本（分区缓存模式用）。
     回忆墙条目默认只注入结构化摘要(mw_meta.summary)；仅当某条明显最强命中时才附全文 body。"""
@@ -1033,6 +1127,11 @@ async def build_memory_text(user_message: str) -> str:
         return ""
     try:
         memories = await search_memories(user_message, limit=MAX_MEMORIES_INJECT)
+        if not memories:
+            return ""
+
+        # ②/① 露骨语境闸：中性语境压制高 arousal/私密记忆（gated，仅有敏感候选才判别当下亲密度）
+        memories, _gate_dbg = await apply_explicit_gate(memories, user_message)
         if not memories:
             return ""
 
@@ -2812,6 +2911,44 @@ async def api_debug_built_prompt(request: Request):
     except Exception as e:
         out["non_cache_mode"] = {"error": str(e)}
     return out
+
+
+@app.post("/api/debug/memory-gate")
+async def api_debug_memory_gate(request: Request):
+    """只读演示 ②/① 露骨语境闸：给一条 user 消息，返回检索原始命中(arousal/score) +
+    语境闸判定(intimate 怎么判的) + 过闸后会注入的列表(adj_score/被挡)。
+    可选 intimate=0/1 强制，确定性对比两侧。不调用上游聊天、不漂移(仅 search 的 last_accessed 更新)。"""
+    try:
+        b = await request.json()
+    except Exception:
+        b = {}
+    q = (b.get("message") or "").strip()
+    force = b.get("intimate", None)
+    if force is not None:
+        force = bool(int(force)) if str(force).strip().isdigit() else bool(force)
+    if not q:
+        return {"error": "需要 message"}
+
+    def _row(m, adj=False):
+        d = {"id": m.get("id"), "arousal": round(float(m.get("arousal") or 0), 2),
+             "score": round(float(m.get("score") or 0), 3),
+             "content": (m.get("content") or "")[:46]}
+        if adj:
+            d["adj_score"] = round(float(m.get("_adj_score") or 0), 3)
+        return d
+
+    raw = await search_memories(q, limit=MAX_MEMORIES_INJECT)
+    gated, dbg = await apply_explicit_gate([dict(m) for m in raw], q, force_intimate=force, force_run=True)
+    kept_ids = {g.get("id") for g in gated}
+    return {
+        "message": q,
+        "thresholds": {"SENSITIVE_AROUSAL": SENSITIVE_AROUSAL, "EXPLICIT_HARD_AROUSAL": EXPLICIT_HARD_AROUSAL,
+                       "EXPLICIT_PENALTY_LAMBDA": EXPLICIT_PENALTY_LAMBDA, "MAX_INJECT": MAX_MEMORIES_INJECT},
+        "decision": dbg,
+        "raw_hits": [_row(m) for m in raw],
+        "after_gate_inject": [_row(m, adj=True) for m in gated],
+        "dropped": [_row(m) for m in raw if m.get("id") not in kept_ids],
+    }
 
 
 @app.post("/api/persona-suggestions/{sug_id}")
