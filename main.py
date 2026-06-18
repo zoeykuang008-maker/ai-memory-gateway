@@ -1499,7 +1499,25 @@ async def chat_completions(request: Request):
     if not model:
         model = DEFAULT_MODEL
     body["model"] = model
-    
+
+    # ① off-by-one 修复：当前轮对话「同步」落库（生成前写 user / 返回前写 assistant），
+    #    取代原 process_memories_background 里的后台写——杜绝「下一轮读历史早于上一轮写入」。
+    #    去重：user 写在 history 读取(get_conversation_messages)之后 → 本轮拼装的 db_msgs 不含它，
+    #    当前轮仍只用客户端那条（一份）；写进 DB 的这条是给「下一轮」读历史用的。
+    #    仅普通文字轮（非辅助请求/非工具结果轮）；re-roll（与 DB 最后一条 user 相同）不重复写 user。
+    _sync_conv = bool(MEMORY_ENABLED and user_message and not skip_conversation_log and not tool_messages)
+    _is_reroll = False
+    if _sync_conv:
+        try:
+            _last_user = await get_last_user_content(session_id)
+            _is_reroll = bool(_last_user and _last_user.strip() == user_message.strip())
+            if not _is_reroll:
+                await save_message(session_id, "user", user_message, model)
+            print(f"📝 同步写 user（{'re-roll跳过' if _is_reroll else '已落库'}）", flush=True)
+        except Exception as _se:
+            print(f"⚠️ 同步写 user 失败，回退后台写: {_se}", flush=True)
+            _sync_conv = False
+
     # ---------- cache_control 兼容性处理 ----------
     if CACHE_PARTITION_ENABLED and not _is_anthropic_model(model):
         _strip_cache_control(body.get("messages", []))
@@ -1540,7 +1558,7 @@ async def chat_completions(request: Request):
     
     if is_stream:
         return StreamingResponse(
-            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages),
+            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages, _sync_conv, _is_reroll),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
@@ -1565,20 +1583,37 @@ async def chat_completions(request: Request):
                 except (KeyError, IndexError):
                     pass
                 
+                # ① 同步写 assistant（返回前）；已同步则后台只提取、不再写对话
+                if _sync_conv and (assistant_msg or assistant_tool_calls):
+                    try:
+                        _meta_d = {}
+                        if assistant_tool_calls:
+                            _meta_d["tool_calls"] = assistant_tool_calls
+                        if assistant_reasoning:
+                            _meta_d["reasoning_content"] = assistant_reasoning
+                        _meta_j = json.dumps(_meta_d) if _meta_d else None
+                        if _is_reroll:
+                            await update_last_assistant_message(session_id, assistant_msg or "", model)
+                        else:
+                            await save_message(session_id, "assistant", assistant_msg or "", model, metadata=_meta_j)
+                        print(f"📝 同步写 assistant（{'re-roll覆盖' if _is_reroll else '已落库'}）", flush=True)
+                    except Exception as _ae:
+                        print(f"⚠️ 同步写 assistant 失败: {_ae}", flush=True)
+
                 if MEMORY_ENABLED and (user_message or tool_messages):
                     asyncio.create_task(
-                        process_memories_background(session_id, user_message, assistant_msg, model, 
-                                                    context_messages=original_messages, skip_conversation_log=skip_conversation_log,
+                        process_memories_background(session_id, user_message, assistant_msg, model,
+                                                    context_messages=original_messages, skip_conversation_log=(skip_conversation_log or _sync_conv),
                                                     tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
                                                     assistant_reasoning=assistant_reasoning)
                     )
-                
+
                 return JSONResponse(status_code=200, content=resp_data)
             else:
                 return JSONResponse(status_code=response.status_code, content=response.json())
 
 
-async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None):
+async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, sync_conv: bool = False, is_reroll: bool = False):
     """流式响应 + 捕获完整回复（原始字节透传，确保SSE格式和thinking数据完整）"""
     full_response = []
     full_reasoning = []
@@ -1676,10 +1711,27 @@ async def stream_and_capture(headers: dict, body: dict, session_id: str, user_me
             asyncio.create_task(save_token_usage(session_id, model, pt, ct, tt))
             print(f"📊 Stream Token: {pt} + {ct} = {tt}")
     
+    # ① 同步写 assistant（流式结束后、调度后台提取前）；已同步则后台只提取、不再写对话
+    if sync_conv and (assistant_msg or assistant_tool_calls):
+        try:
+            _meta_d = {}
+            if assistant_tool_calls:
+                _meta_d["tool_calls"] = assistant_tool_calls
+            if assistant_reasoning:
+                _meta_d["reasoning_content"] = assistant_reasoning
+            _meta_j = json.dumps(_meta_d) if _meta_d else None
+            if is_reroll:
+                await update_last_assistant_message(session_id, assistant_msg or "", model)
+            else:
+                await save_message(session_id, "assistant", assistant_msg or "", model, metadata=_meta_j)
+            print(f"📝 同步写 assistant 流式（{'re-roll覆盖' if is_reroll else '已落库'}）", flush=True)
+        except Exception as _ae:
+            print(f"⚠️ 同步写 assistant 流式失败: {_ae}", flush=True)
+
     if MEMORY_ENABLED and (user_message or tool_messages):
         asyncio.create_task(
-            process_memories_background(session_id, user_message, assistant_msg, model, 
-                                        context_messages=original_messages, skip_conversation_log=skip_conversation_log,
+            process_memories_background(session_id, user_message, assistant_msg, model,
+                                        context_messages=original_messages, skip_conversation_log=(skip_conversation_log or sync_conv),
                                         tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
                                         assistant_reasoning=assistant_reasoning)
         )
