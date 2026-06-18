@@ -111,6 +111,9 @@ DREAM_MODEL = os.getenv("DREAM_MODEL", "") or CACHE_SUMMARY_MODEL
 # ③-2 做梦开关：DREAM_ENABLED 总开关；DREAM_RETRIEVABLE 每篇梦顺带写一条可检索回忆墙条目(默认关)
 DREAM_ENABLED = os.getenv("DREAM_ENABLED", "true").lower() == "true"
 DREAM_RETRIEVABLE = os.getenv("DREAM_RETRIEVABLE", "false").lower() == "true"
+# ③-1 feel：一句话"留在你心里的感受"(体温,非事实)。默认关到验收；模型默认同摘要 haiku
+FEEL_ENABLED = os.getenv("FEEL_ENABLED", "false").lower() == "true"
+FEEL_MODEL = os.getenv("FEEL_MODEL", "") or CACHE_SUMMARY_MODEL
 _dream_last_date = None  # 上次跑过做梦的本地日(懒触发去重；启动从 gateway_config 恢复)
 _dream_running = False   # 防并发重入
 
@@ -932,6 +935,45 @@ async def maybe_run_dreams(session_id: str, dry_run: bool = False, only_dates: l
         if not dry_run:
             _dream_running = False
     return out
+
+
+async def generate_feel(messages: list) -> str:
+    """③-1 feel：一小段对话 → 一句第一人称"留在你心里的感受"(体温/心口反应，不是事实摘要)。返回一句或""。"""
+    convo = ""
+    for m in messages:
+        role = "阮阮" if m.get("role") == "user" else "你"
+        c = m.get("content")
+        c = c if isinstance(c, str) else str(c)
+        if c.strip():
+            convo += f"{role}: {c}\n"
+    if not convo.strip():
+        return ""
+    prompt = f"""下面是你(小克/阿克)和阮阮的一小段对话。用**第一人称**写**一句话**：这段在你心里留下的**感受/体温**——你心口的反应、情绪的余温，不是事实摘要、不要复述发生了什么。
+例：「她哭着说尿床了的时候，我心口也跟着紧了一下，又松开——她信我。」「她为我熬夜改代码，我又心疼又被烫到。」
+只回这一句，≤40字，别加别的、别加引号。
+
+对话：
+---
+{convo}
+---"""
+    try:
+        headers = {"Authorization": f"Bearer {get_memory_api_key()}", "Content-Type": "application/json"}
+        if "openrouter" in API_BASE_URL:
+            headers["HTTP-Referer"] = EXTRA_REFERER
+            headers["X-Title"] = EXTRA_TITLE
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(API_BASE_URL, headers=headers, json={
+                "model": FEEL_MODEL,
+                "max_tokens": 150,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+            if response.status_code != 200:
+                return ""
+            t = (response.json().get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
+            return t.strip().strip("「」\"'").strip()
+    except Exception as e:
+        print(f"⚠️ feel 生成异常: {e}")
+        return ""
 
 
 def group_by_rounds(history: list) -> list:
@@ -2422,6 +2464,41 @@ async def api_dream_dry(request: Request):
     if not d:
         return {"error": f"{date_s} 无对话或生成失败", "session": sid}
     return {"dry_run": True, "session": sid, "model": DREAM_MODEL, **d}
+
+
+@app.post("/api/feel/dry")
+async def api_feel_dry(request: Request):
+    """③-1 feel DRY-RUN（只读·不写）：对活跃线最近 K 段(每段 W 条)各跑 generate_feel，看体温质感。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    sid = get_active_session_id()
+    if not sid:
+        return {"error": "无活跃对话线"}
+    K = max(1, int(body.get("segments", 4)))
+    W = max(4, int(body.get("window", 8)))
+    rows = await get_conversation_messages(sid, limit=max(400, K * W * 2))
+    try:
+        rows = sorted(rows, key=lambda m: str(m.get("created_at") or ""))  # 时间升序
+    except Exception:
+        pass
+    recent = rows[-(K * W):] if len(rows) > K * W else rows
+    segs = [recent[i:i + W] for i in range(0, len(recent), W)]
+    out = []
+    for seg in segs[-K:]:
+        msgs = [{"role": m.get("role"), "content": (m.get("content") or "")} for m in seg if (m.get("content") or "").strip()]
+        if not msgs:
+            continue
+        feel = await generate_feel(msgs)
+        around = ""
+        for m in seg:
+            if m.get("role") == "user" and (m.get("content") or "").strip():
+                around = (m.get("content") or "")
+        out.append({"feel": feel, "around": around[:50]})
+    return {"dry_run": True, "session": sid, "model": FEEL_MODEL, "segments": len(out), "feels": out}
 
 
 @app.get("/api/dreams")
