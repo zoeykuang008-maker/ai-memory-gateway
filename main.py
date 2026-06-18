@@ -381,6 +381,15 @@ async def lifespan(app: FastAPI):
                     print("💤 做梦首次启动：上次日期=今天(不自动补历史，等手动确认或明日跨天)")
             except Exception:
                 pass
+
+            # ③-1 feel 开关：从DB恢复(运行时 /api/feel/toggle 可切)
+            try:
+                _fe = await get_gateway_config("feel_enabled", "")
+                if _fe != "":
+                    globals()["FEEL_ENABLED"] = (str(_fe).lower() == "true")
+                    print(f"💗 feel 开关(DB恢复)：{globals()['FEEL_ENABLED']}")
+            except Exception:
+                pass
         except Exception as e:
             print(f"⚠️  数据库初始化失败: {e}")
             print("⚠️  记忆系统将不可用，但网关仍可正常转发")
@@ -2563,6 +2572,26 @@ async def api_feel_dry(request: Request):
             "segments": len(out), "feels": out,
             "inject_block_len": len(block_now), "inject_block": block_now,
             "inject_block_no_redact": ("〔最近留在你心里的〕\n" + "\n".join(_all))}
+
+
+@app.post("/api/feel/toggle")
+async def api_feel_toggle(request: Request):
+    """运行时切换 ③-1 feel 总开关(生成+注入)，持久化 gateway_config、启动恢复。body: {enabled: true/false}"""
+    global FEEL_ENABLED
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    val = bool(body.get("enabled"))
+    FEEL_ENABLED = val
+    await set_gateway_config("feel_enabled", "true" if val else "false")
+    print(f"💗 feel 开关 → {val}")
+    return {"status": "ok", "feel_enabled": val}
+
+
+@app.get("/api/feel")
+async def api_feel_status():
+    return {"feel_enabled": FEEL_ENABLED}
 
 
 @app.get("/api/dreams")
