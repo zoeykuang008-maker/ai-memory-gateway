@@ -25,7 +25,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, Res
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, apply_mood_drift, get_emotion_backfill_targets, update_emotion_only
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, apply_mood_drift, get_emotion_backfill_targets, update_emotion_only, update_memory_emotion
 from database import save_migrated_memory, find_memory_by_mw_id, save_photo, link_photo_to_memory, get_photo, memory_photo_count, delete_memory_photos, get_mw_meta, update_mw_meta
 from database import list_memorywall, get_memorywall_one, update_memorywall, get_memory_photos, set_memory_active
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion
@@ -76,6 +76,10 @@ MOOD_DRIFT_STEP = float(os.getenv("MOOD_DRIFT_STEP", "0.1"))            # 每条
 MOOD_DRIFT_DAILY_CAP = int(os.getenv("MOOD_DRIFT_DAILY_CAP", "3"))      # 每条每日漂移次数封顶
 MOOD_RECENT_N = int(os.getenv("MOOD_RECENT_N", "30"))                   # current_mood 的「最近记忆」窗口
 MOOD_DRIFT_SKIP_MEMORYWALL = os.getenv("MOOD_DRIFT_SKIP_MEMORYWALL", "true").lower() == "true"  # 回忆墙豁免漂移+不进基线
+
+# 人设建议自动生成：开关 + importance 门槛（默认开着但门槛抬高，平凡偏好如"回复别太长"不收；可随时关）
+PERSONA_SUGGESTION_ENABLED = os.getenv("PERSONA_SUGGESTION_ENABLED", "true").lower() == "true"
+PERSONA_SUGGESTION_MIN_IMPORTANCE = int(os.getenv("PERSONA_SUGGESTION_MIN_IMPORTANCE", "7"))
 
 # 分区缓存
 CACHE_PARTITION_ENABLED = os.getenv("CACHE_PARTITION_ENABLED", "false").lower() == "true"
@@ -1077,6 +1081,10 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         for mem in filtered_memories:
             # A4 提取路由：行为/相处偏好不进记忆池，收集到 persona_suggestions 供主理人贴人设
             if mem.get("kind") == "persona":
+                _pimp = int(mem.get("importance", 5) or 5)
+                if not PERSONA_SUGGESTION_ENABLED or _pimp < PERSONA_SUGGESTION_MIN_IMPORTANCE:
+                    print(f"⏭️ 人设建议跳过(开关={PERSONA_SUGGESTION_ENABLED}/门槛 imp={_pimp}<{PERSONA_SUGGESTION_MIN_IMPORTANCE}): {mem['content'][:40]}")
+                    continue
                 try:
                     await save_persona_suggestion(mem["content"], session_id)
                     persona_routed += 1
@@ -1621,7 +1629,7 @@ async def api_search_memories(q: str = "", limit: int = 20):
 
 @app.put("/api/memories/{memory_id}")
 async def api_update_memory(memory_id: int, request: Request):
-    """更新单条记忆（支持 content / importance / title / layer）"""
+    """更新单条记忆（支持 content / importance / title / layer / valence / arousal）"""
     if not MEMORY_ENABLED:
         return {"error": "记忆系统未启用"}
     data = await request.json()
@@ -1632,6 +1640,9 @@ async def api_update_memory(memory_id: int, request: Request):
         title=data.get("title"),
         layer=data.get("layer"),
     )
+    # 面板手动改情绪：仅当显式带 valence/arousal 时覆盖写两列 + 重置漂移基线（其余字段走上面常规更新）
+    if data.get("valence") is not None and data.get("arousal") is not None:
+        await update_memory_emotion(memory_id, data["valence"], data["arousal"])
     return {"status": "ok", "id": memory_id}
 
 

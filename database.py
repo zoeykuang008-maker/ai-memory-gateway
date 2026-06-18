@@ -1411,7 +1411,7 @@ async def get_all_memories_detail(limit: int = None, layer: int = None, active_o
         rows = await conn.fetch(f"""
             SELECT id, content, importance, source_session, created_at,
                    layer, title, is_active, merged_from, event_date, valence, arousal,
-                   drift_day, drift_today
+                   drift_day, drift_today, (mw_meta IS NOT NULL) AS is_mw
             FROM memories
             {where_clause}
             ORDER BY id
@@ -1458,6 +1458,18 @@ async def update_emotion_only(memory_id: int, valence: float, arousal: float) ->
                  AND arousal > 0.19 AND arousal < 0.21""",
             memory_id, v, a)
         return bool(tag) and tag.rsplit(" ", 1)[-1] != "0"
+
+
+async def update_memory_emotion(memory_id: int, valence: float, arousal: float):
+    """面板手动改情绪：无条件覆盖写 valence/arousal，并重置漂移基线(drift_day/drift_today 清零)，
+    让她的手动值成为新基线、不被已累计的当日漂移立刻吃掉。只动这两列 + 漂移计数，不碰正文/importance/日期。"""
+    v = max(-1.0, min(1.0, float(valence)))
+    a = max(0.0, min(1.0, float(arousal)))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE memories SET valence = $2, arousal = $3, drift_day = NULL, drift_today = 0 WHERE id = $1",
+            memory_id, v, a)
 
 
 async def update_memory(memory_id: int, content: str = None, importance: int = None):

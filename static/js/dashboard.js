@@ -174,13 +174,33 @@ function updateLayerCounts(stats) {
 // ============================================
 // 记忆管理功能
 // ============================================
+// 情绪①面板：把 (v,a) 翻成感觉词（和后端 build_memory_text 的 mood_word 同一映射，保证界面=小克所见）
+function moodWord(v, a) {
+    v = parseFloat(v); a = parseFloat(a);
+    if (isNaN(v) || isNaN(a)) return '';
+    if (Math.abs(v) < 0.15 && a < 0.45) return '';
+    if (v >= 0.35) return a >= 0.55 ? '热烈' : '温暖';
+    if (v >= 0.15) return a >= 0.55 ? '明快' : '平和';
+    if (v <= -0.35) return a >= 0.55 ? '紧绷' : '沉重';
+    if (v <= -0.15) return a >= 0.55 ? '焦灼' : '低落';
+    return '紧绷';
+}
+function sourceLabel(src) {
+    if (!src) return '—';
+    if (src === 'memory_wall') return '回忆墙';
+    if (src === '01' || src === '02' || src.length <= 3 || /^[0-9a-f]{6,}$/i.test(src)) return '聊天';
+    if (src.indexOf('import') >= 0) return '导入';
+    return src;
+}
+
 async function loadMemories() {
     try {
         const resp = await fetch('/api/memories');
         const data = await resp.json();
         allMemories = data.memories || [];
         if (data.layer_stats) updateLayerCounts(data.layer_stats);
-        document.getElementById('stats').textContent = '共 ' + allMemories.length + ' 条记忆';
+        const _act = allMemories.filter(m => m.is_active !== false).length;
+        document.getElementById('stats').textContent = '共 ' + allMemories.length + ' 条（活跃 ' + _act + ' / 归档 ' + (allMemories.length - _act) + '）';
         filterAndSort();
     } catch(e) {
         showManageMsg('error', '加载失败：' + e.message);
@@ -196,7 +216,19 @@ function renderTable(mems, startIndex) {
         const rowClass = isInactive ? 'inactive-row' : '';
         const titleDisplay = m.title || '';
         const mergedFrom = m.merged_from || [];
-        
+        // 情绪列 + 状态徽标（内联样式，不依赖 CSS）
+        const _v = (m.valence !== undefined && m.valence !== null) ? m.valence : 0;
+        const _a = (m.arousal !== undefined && m.arousal !== null) ? m.arousal : 0.2;
+        const _w = moodWord(_v, _a);
+        const _emoCell = '<td class="col-emotion" style="white-space:nowrap">' +
+            '<span style="display:inline-block;min-width:30px;padding:1px 6px;border-radius:8px;font-size:12px;background:' + (_w ? '#eef2ff' : '#f1f1f1') + ';color:' + (_w ? '#3949ab' : '#999') + '">' + (_w || '中性') + '</span>' +
+            '<div style="margin-top:2px"><input type="number" id="v_' + m.id + '" value="' + (+_v).toFixed(2) + '" step="0.1" min="-1" max="1" title="valence 效价 -1~1" style="width:46px;font-size:11px">' +
+            '<input type="number" id="a_' + m.id + '" value="' + (+_a).toFixed(2) + '" step="0.1" min="0" max="1" title="arousal 唤醒 0~1" style="width:46px;font-size:11px"></div></td>';
+        let _badges = (isInactive ? '<span style="background:#9e9e9e;color:#fff;padding:1px 6px;border-radius:8px;font-size:11px">已归档</span>' : '<span style="background:#43a047;color:#fff;padding:1px 6px;border-radius:8px;font-size:11px">活跃</span>');
+        if (m.is_mw) _badges += ' <span style="background:#8e24aa;color:#fff;padding:1px 6px;border-radius:8px;font-size:11px">回忆墙</span>';
+        _badges += ' <span style="background:#eceff1;color:#546e7a;padding:1px 6px;border-radius:8px;font-size:11px">' + sourceLabel(m.source_session) + '</span>';
+        const _statusCell = '<td class="col-status" style="white-space:nowrap">' + _badges + '</td>';
+
         // 层级下拉选择器
         const layerSelect = '<select class="layer-select" id="l_' + m.id + '" onchange="changeLayer(' + m.id + ')">' +
             '<option value="1"' + (layer === 1 ? ' selected' : '') + '>碎片</option>' +
@@ -227,11 +259,13 @@ function renderTable(mems, startIndex) {
         
         return '<tr data-id="' + m.id + '" class="' + rowClass + '">' +
             '<td class="col-check"><input type="checkbox" class="mem-check" value="' + m.id + '" onchange="updateFloatingBar()"></td>' +
-            '<td class="col-id">' + (startIndex + i + 1) + mergeInfo + '</td>' +
+            '<td class="col-id">' + m.id + mergeInfo + '</td>' +
             '<td class="col-layer">' + layerSelect + '</td>' +
             '<td class="col-title"><input type="text" class="title-input" id="t_' + m.id + '" value="' + escHtml(titleDisplay) + '" placeholder="无标题"></td>' +
             '<td class="col-content"><textarea class="content-textarea" id="c_' + m.id + '">' + escHtml(m.content) + '</textarea></td>' +
             '<td class="col-importance"><input type="number" class="importance-input" id="i_' + m.id + '" value="' + m.importance + '" min="1" max="10"></td>' +
+            _emoCell +
+            _statusCell +
             '<td class="col-time">' + fmtTime(m.created_at) + '</td>' +
             '<td class="col-actions"><div class="row-actions">' +
                 '<button class="btn btn-primary btn-sm" onclick="saveMem(' + m.id + ')">保存</button>' +
@@ -420,12 +454,16 @@ async function saveMem(id) {
     const layerEl = document.getElementById('l_' + id);
     const title = titleEl ? titleEl.value : null;
     const layer = layerEl ? parseInt(layerEl.value) : null;
-    
+    const vEl = document.getElementById('v_' + id);
+    const aEl = document.getElementById('a_' + id);
+    const _body = {content, importance, title, layer};
+    if (vEl && aEl) { _body.valence = parseFloat(vEl.value); _body.arousal = parseFloat(aEl.value); }
+
     try {
         const resp = await fetch('/api/memories/' + id, {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({content, importance, title, layer})
+            body: JSON.stringify(_body)
         });
         const data = await resp.json();
         if (data.error) {
