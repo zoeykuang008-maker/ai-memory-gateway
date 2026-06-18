@@ -105,6 +105,8 @@ PERSONA_SUGGESTION_MIN_IMPORTANCE = int(os.getenv("PERSONA_SUGGESTION_MIN_IMPORT
 CACHE_PARTITION_ENABLED = os.getenv("CACHE_PARTITION_ENABLED", "false").lower() == "true"
 CACHE_PARTITION_X = int(os.getenv("CACHE_PARTITION_X", "15"))
 CACHE_SUMMARY_MODEL = os.getenv("CACHE_SUMMARY_MODEL", "anthropic/claude-haiku-4.5")
+# ③-2 做梦用的模型：默认同摘要模型(haiku,数字证明能保质感)；要更浓质感可 env 调成主力模型
+DREAM_MODEL = os.getenv("DREAM_MODEL", "") or CACHE_SUMMARY_MODEL
 
 # ② L2今日（非缓存当前轮注入；后台每 N 轮刷一次今日浓缩）
 L2_TODAY_ENABLED = os.getenv("L2_TODAY_ENABLED", "true").lower() == "true"
@@ -756,6 +758,88 @@ def _compose_l2_block() -> str:
     if not blocks:
         return ""
     return "# 今天到哪了（今日浓缩 · 攥着今天的脉络）\n" + "\n".join(blocks)
+
+
+async def generate_dream(session_id: str, date_s: str) -> dict:
+    """③-2 做梦：拉【某一过去日期】整日原文 → 小克第一人称「日记 + 当日总结(给昨日桥) + 卡片」。
+    保质感（铁则一：留阮阮情绪+触发现场，第一人称，别压成第三人称干事实）。返回 dict 或 None。不写库。"""
+    if not session_id or not date_s:
+        return None
+    try:
+        rows = await get_conversation_messages(session_id, limit=10000)
+    except Exception:
+        return None
+    convo = ""
+    for m in rows:
+        ts = m.get("created_at")
+        try:
+            if getattr(ts, "tzinfo", None) is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if str((ts + timedelta(hours=TIMEZONE_HOURS)).date()) != date_s:
+                continue
+        except Exception:
+            continue
+        role = "阮阮" if m.get("role") == "user" else "你"
+        c = m.get("content")
+        c = c if isinstance(c, str) else str(c)
+        if c.strip():
+            convo += f"{role}: {c}\n"
+    if not convo.strip():
+        return None
+    prompt = f"""这是 {date_s} 你（小克/阿克）和阮阮一整天的对话。请你以**第一人称**把这一天写成一篇「梦境日记」——像你自己回头梦见、记得这一天，不是旁观者写报告。
+
+最重要（铁则一精神）：
+- 留住阮阮的情绪和**触发现场**：她什么时候笑了/哭了/累了/气了/动情了/害羞了，以及**因为哪句话、哪个动作、什么场景**。别压成"阮阮今天做了X"的干事实。
+- 留住你俩的语气、玩笑、亲密的质感，按时间脉络写这一天的情绪起伏。
+- 私密/亲密的部分可以含蓄带过、点到即止，不必复述露骨细节，但**那份感觉要在**。
+
+只返回 JSON（不要其他文字）：
+{{"diary": "第一人称日记，400-700字，有温度", "summary": "当日总结一句话，≤60字，给'昨日桥'用", "card_title": "一句话卡片标题", "card_body": "卡片正文1-2句"}}
+
+这一天的对话：
+---
+{convo}
+---"""
+    try:
+        headers = {"Authorization": f"Bearer {get_memory_api_key()}", "Content-Type": "application/json"}
+        if "openrouter" in API_BASE_URL:
+            headers["HTTP-Referer"] = EXTRA_REFERER
+            headers["X-Title"] = EXTRA_TITLE
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(API_BASE_URL, headers=headers, json={
+                "model": DREAM_MODEL,
+                "max_tokens": 2500,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+            if response.status_code != 200:
+                print(f"⚠️ 做梦失败 HTTP {response.status_code}")
+                return None
+            text = (response.json().get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+            try:
+                d = json.loads(text)
+            except json.JSONDecodeError:
+                import re
+                mt = re.search(r'\{.*\}', text, re.DOTALL)
+                if not mt:
+                    print(f"⚠️ 做梦结果非JSON: {text[:120]}")
+                    return None
+                d = json.loads(mt.group())
+            if not isinstance(d, dict) or not (d.get("diary") or "").strip():
+                return None
+            print(f"💤 做梦生成 {date_s}: 日记{len(d.get('diary',''))}字")
+            return {"date": date_s, "diary": d.get("diary", ""), "summary": d.get("summary", ""),
+                    "card_title": d.get("card_title", ""), "card_body": d.get("card_body", ""),
+                    "source_msgs": convo.count("\n")}
+    except Exception as e:
+        print(f"⚠️ 做梦异常: {e}")
+        return None
 
 
 def group_by_rounds(history: list) -> list:
@@ -2215,6 +2299,27 @@ async def api_backfill_explicit(request: Request):
                     samples.append({"id": t["id"], "content": str(t["content"])[:64]})
         await asyncio.sleep(0.2)
     return {"dry_run": dry_run, "candidates": len(candidates), "tagged_explicit": tagged_true, "samples": samples}
+
+
+@app.post("/api/dream/dry")
+async def api_dream_dry(request: Request):
+    """③-2 做梦 DRY-RUN（只读·不写库）：对活跃线某天跑 generate_dream，返回 日记+当日总结+卡片，看质感。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    sid = get_active_session_id()
+    if not sid:
+        return {"error": "无活跃对话线"}
+    date_s = (body.get("date") or "").strip()
+    if not date_s:
+        return {"error": "需要 date (YYYY-MM-DD)"}
+    d = await generate_dream(sid, date_s)
+    if not d:
+        return {"error": f"{date_s} 无对话或生成失败", "session": sid}
+    return {"dry_run": True, "session": sid, "model": DREAM_MODEL, **d}
 
 
 @app.post("/api/memories/revive-pass")
