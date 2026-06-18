@@ -802,6 +802,17 @@ async def get_explicit_backfill_candidates(keywords: list, ids: list = None, lim
 
 # ---- ③-2 做梦 ----
 
+def _to_date(s):
+    """'YYYY-MM-DD' 字符串 → datetime.date(asyncpg 的 date 列要 date 对象,不能传 str)。"""
+    import datetime as _dt
+    if isinstance(s, _dt.date):
+        return s
+    try:
+        return _dt.date.fromisoformat(str(s)[:10])
+    except Exception:
+        return s
+
+
 async def save_dream(dream_date: str, diary: str, summary: str = "", card_title: str = "",
                      card_body: str = "", model: str = "") -> bool:
     """写/覆盖某天的梦（dream_date 唯一，幂等 upsert）。"""
@@ -809,12 +820,12 @@ async def save_dream(dream_date: str, diary: str, summary: str = "", card_title:
     async with pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO dreams (dream_date, diary, summary, card_title, card_body, model)
-            VALUES ($1::date, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (dream_date) DO UPDATE SET
                 diary=EXCLUDED.diary, summary=EXCLUDED.summary,
                 card_title=EXCLUDED.card_title, card_body=EXCLUDED.card_body,
                 model=EXCLUDED.model, created_at=NOW()
-        """, dream_date, diary, summary, card_title, card_body, model)
+        """, _to_date(dream_date), diary, summary, card_title, card_body, model)
         return True
 
 
@@ -823,7 +834,7 @@ async def get_dream(dream_date: str):
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT dream_date, diary, summary, card_title, card_body, model, created_at "
-            "FROM dreams WHERE dream_date = $1::date", dream_date)
+            "FROM dreams WHERE dream_date = $1", _to_date(dream_date))
         return dict(row) if row else None
 
 
