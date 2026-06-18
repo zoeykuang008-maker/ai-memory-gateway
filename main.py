@@ -2439,12 +2439,17 @@ async def api_dreams_list():
         return {"error": str(e)}
 
 
+_dream_run = {"running": False, "dry_run": True, "results": [], "error": None, "finished_at": None}
+
+
 @app.post("/api/dreams/run")
 async def api_dreams_run(request: Request):
-    """③-2 手动跑做梦补做。body: {dry_run, dates}。dry_run=true 只生成返回(含完整日记)不写库；
-    dates 不给则自动找[对话存在&<今天&无梦&未被回忆墙覆盖]的过去日。"""
+    """③-2 手动跑做梦补做（后台跑+轮询，避开代理掐长连接）。body: {dry_run, dates}。
+    dry_run=true 只生成不写库(结果含完整日记，存 /status 拿)；dates 不给则自动找未覆盖过去日。"""
     if not MEMORY_ENABLED:
         return {"error": "记忆系统未启用"}
+    if _dream_run["running"]:
+        return {"error": "做梦任务运行中", "status": dict(_dream_run)}
     try:
         body = await request.json()
     except Exception:
@@ -2454,8 +2459,24 @@ async def api_dreams_run(request: Request):
         return {"error": "无活跃对话线"}
     dry_run = bool(body.get("dry_run", True))
     dates = body.get("dates") or None
-    res = await maybe_run_dreams(sid, dry_run=dry_run, only_dates=dates)
-    return {"dry_run": dry_run, "active_session": sid, "results": res}
+    _dream_run.update({"running": True, "dry_run": dry_run, "results": [], "error": None, "finished_at": None})
+
+    async def _run():
+        try:
+            _dream_run["results"] = await maybe_run_dreams(sid, dry_run=dry_run, only_dates=dates)
+        except Exception as e:
+            _dream_run["error"] = str(e)
+        finally:
+            _dream_run["running"] = False
+            _dream_run["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+    asyncio.create_task(_run())
+    return {"status": "started", "dry_run": dry_run, "active_session": sid}
+
+
+@app.get("/api/dreams/run/status")
+async def api_dreams_run_status():
+    return dict(_dream_run)
 
 
 
