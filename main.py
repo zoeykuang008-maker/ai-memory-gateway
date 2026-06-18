@@ -2272,7 +2272,20 @@ async def api_revive_dry(request: Request):
 
     # 复活：重提取时【不传 existing】——要的就是把同样内容带情绪/现场重做一遍；
     # 去重/replaces_id(对账干碎片、跳过已有好记忆)留到真·写入 pass 再做。
-    revived = await extract_memories(msgs_for_extract, existing_memories=None)
+    _roles = {}
+    for _m in msgs_for_extract:
+        _roles[_m["role"]] = _roles.get(_m["role"], 0) + 1
+    _dbg = {
+        "roles": _roles,
+        "total_chars": sum(len(_m["content"]) for _m in msgs_for_extract),
+        "sample5": [((_m["role"] or "?") + ":" + (_m["content"] or "")[:50]) for _m in msgs_for_extract[:5]],
+    }
+    try:
+        revived = await extract_memories(msgs_for_extract, existing_memories=None)
+        _dbg["extract_ok"] = True
+    except Exception as _ee:
+        revived = []
+        _dbg["extract_error"] = str(_ee)
 
     return {
         "dry_run": True,
@@ -2281,6 +2294,7 @@ async def api_revive_dry(request: Request):
         "window_msgs": len(msgs_for_extract),
         "available_dates": list(by_date.keys())[:30],
         "existing_dry_fragments_on_day": dry_on_day[:30],
+        "debug": _dbg,
         "revived_count": len(revived),
         "revived_candidates": [
             {"content": r.get("content"), "kind": r.get("kind"),
