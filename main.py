@@ -3020,6 +3020,25 @@ async def api_debug_built_prompt(request: Request):
         out["non_cache_mode"] = _assert(enhanced)
     except Exception as e:
         out["non_cache_mode"] = {"error": str(e)}
+
+    # 0-B 层视图：把"小克此刻读到什么"逐层拆开（全只读 drift=False；检索记忆为过收敛闸后的真实注入）
+    try:
+        def _layer(name, text):
+            t = text or ""
+            return {"name": name, "len": len(t), "text": t}
+        _mem = await build_memory_text(sample, drift=False) if (MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED) else ""
+        layers = [
+            _layer("人设 persona", persona or ""),
+            _layer("关于阮阮 user_profile", up_block or ""),
+            _layer("L5 根基（常驻）", _compose_l5_block(await get_l5_foundation())),
+            _layer("L2 今日（昨日桥 + 今天到哪了）", _compose_l2_block()),
+            _layer("检索记忆（当前轮·过收敛闸后）", _mem),
+            _layer("时间注入", build_time_injection(None)),
+        ]
+        out["layers"] = layers
+        out["layers_total_len"] = sum(l["len"] for l in layers)
+    except Exception as e:
+        out["layers"] = {"error": str(e)}
     return out
 
 

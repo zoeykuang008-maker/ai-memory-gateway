@@ -123,6 +123,9 @@ function switchSection(name) {
     if (name === 'persona') {
         loadPersonaSuggestions();
     }
+    if (name === 'layerview') {
+        loadLayerView();
+    }
 }
 
 // ============================================
@@ -984,6 +987,44 @@ async function loadExportStats() {
 function doExport() {
     // 直接跳转到导出接口，浏览器会下载文件
     window.location.href = '/export/memories';
+}
+
+
+// ============================================
+// 0-B 层视图：小克此刻读到什么（只读）
+// ============================================
+async function loadLayerView() {
+    const msg = (document.getElementById('lv-msg').value || '宝贝我到家了').trim();
+    const sum = document.getElementById('lv-summary');
+    const box = document.getElementById('lv-layers');
+    sum.textContent = '加载中…';
+    box.innerHTML = '';
+    try {
+        const resp = await fetch('/api/debug/built-prompt', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({message: msg})
+        });
+        const data = await resp.json();
+        const layers = data.layers || [];
+        if (!Array.isArray(layers)) { sum.textContent = '层数据异常: ' + JSON.stringify(layers); return; }
+        const curLen = (data.partition_cache_mode && data.partition_cache_mode.current_user_turn_len) || 0;
+        sum.textContent = '模式: ' + (data.live_mode || '?') + ' · 各层合计 ' + (data.layers_total_len || 0) + ' 字 · 当前轮 ' + curLen + ' 字（只读，未触发漂移）';
+        box.innerHTML = layers.map(function(l) {
+            const esc = (l.text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const empty = (l.len === 0);
+            return '<div class="card" style="margin:10px 0;padding:12px;">'
+                + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">'
+                + '<b>' + l.name + '</b>'
+                + '<span style="color:var(--text-secondary,#888);font-size:12px;">' + l.len + ' 字' + (empty ? ' · 空' : '') + '</span></div>'
+                + (empty
+                    ? '<div style="color:#bbb;font-size:13px;">（此层为空，未注入）</div>'
+                    : '<pre style="white-space:pre-wrap;word-break:break-word;font-size:12px;margin:0;max-height:320px;overflow:auto;background:var(--bg-secondary,#f7f7f7);padding:8px;border-radius:6px;">' + esc + '</pre>')
+                + '</div>';
+        }).join('');
+    } catch (e) {
+        sum.textContent = '加载失败: ' + e;
+    }
 }
 
 
