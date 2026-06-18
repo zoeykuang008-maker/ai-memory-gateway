@@ -76,12 +76,17 @@ EXTRACTION_PROMPT = """你是记忆提取专家。从对话中提取值得长期
 - 判据：它是否"改变了关系本身的结构/台阶"——是→true；只是"美好/动情的一刻"→false
 - 只有 kind="fact" 才可能 true；拿不准就给 false
 
+# 铁则六：露骨/私密标记 is_explicit（只标 kind=fact；命中后注入时不复述原文、收敛成一句提示）
+- ✅ is_explicit=true：具体性场景/性行为细节；私密的身体/性相关「事实·参数·数据」（玩具尺寸规格、身体反应数据、潮吹/G点/高潮/穴等生理记录、私密身体部位状态）；私密的性相关原话引用
+- ❌ is_explicit=false：暗号释义（"炒菜=亲密暗号"，要 false 好让你仍懂暗号）；"有亲密/性关系"这类纯关系陈述（不含细节）；与性无关的日常/情感/技术/玩笑/健康（如例假日期）
+- persona 条目不需要；拿不准偏向 false
+
 # 输出格式（只返回 JSON 数组，不要其他文字）
 [
-  {{"kind": "fact", "content": "中性客观事实", "importance": 分数, "replaces_id": null, "valence": 0.0, "arousal": 0.2, "is_milestone": false}},
+  {{"kind": "fact", "content": "中性客观事实", "importance": 分数, "replaces_id": null, "valence": 0.0, "arousal": 0.2, "is_milestone": false, "is_explicit": false}},
   {{"kind": "persona", "content": "行为/相处偏好", "importance": 分数}}
 ]
-importance 为 1-10（10最重要）；valence∈[-1,1]、arousal∈[0,1]；is_milestone 默认 false。没有可提取的就返回 []。
+importance 为 1-10（10最重要）；valence∈[-1,1]、arousal∈[0,1]；is_milestone/is_explicit 默认 false。没有可提取的就返回 []。
 """
 
 
@@ -223,6 +228,7 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
                         item["replaces_id"] = int(rid.strip())
                     # ② L5：里程碑标记（仅 kind=fact 才认）
                     item["is_milestone"] = bool(mem.get("is_milestone")) and kind == "fact"
+                    item["is_explicit"] = bool(mem.get("is_explicit")) and kind == "fact"
                     valid_memories.append(item)
 
             print(f"📝 从对话中提取了 {len(valid_memories)} 条（已对比 {len(existing_memories or [])} 条已有记忆）")
@@ -409,12 +415,13 @@ async def tag_emotions_batch(items: list) -> dict:
 EXPLICIT_BACKFILL_PROMPT = """你在给一批记忆打「是否露骨/私密」标记（is_explicit）。
 
 # 判定 is_explicit = true（命中后注入时不会复述原文，只收敛成一句提示）
-- 描述或引用了**具体的性场景/性行为细节**（做了什么、说了什么露骨的话、身体细节、高潮等）
-- 记录了**私密的性相关原话引用**（如把某句露骨的话当内容）
+- 具体性场景/性行为细节（做了什么、说了什么露骨的话、身体细节、高潮等）
+- 私密的身体/性相关「事实·参数·数据」：玩具尺寸规格、身体反应数据、潮吹/G点/高潮/穴等生理记录、私密身体部位状态
+- 私密的性相关原话引用
 
 # 判定 is_explicit = false
-- 仅是「他们有亲密/性关系」「某词是暗号」这类**中性事实或暗号释义**（不含场景细节）——这类要 false，好让对方仍能"懂暗号"
-- 日常、情感、技术、玩笑、生活细节等与性场景无关的内容
+- 暗号释义（"炒菜=亲密暗号"）、"他们有亲密/性关系"这类纯关系陈述（不含细节）——要 false，好让对方仍能"懂暗号"
+- 与性无关的日常、情感、技术、玩笑、生活细节、健康（如例假日期）
 
 # 输入（每行：id: 内容）
 {items}

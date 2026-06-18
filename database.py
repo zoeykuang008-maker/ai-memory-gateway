@@ -719,15 +719,15 @@ async def update_message_content(message_id: int, new_content: str):
 # 记忆操作
 # ============================================================
 
-async def save_memory(content: str, importance: int = 5, source_session: str = "", valence: float = 0.0, arousal: float = 0.2):
+async def save_memory(content: str, importance: int = 5, source_session: str = "", valence: float = 0.0, arousal: float = 0.2, is_explicit: bool = False):
     pool = await get_pool()
     async with pool.acquire() as conn:
         # 情绪① 夹紧到合法范围（arousal 默认 0.2 兼作地板，避免后续衰减乘到 0 退化）
         _val = max(-1.0, min(1.0, float(valence if valence is not None else 0.0)))
         _aro = max(0.0, min(1.0, float(arousal if arousal is not None else 0.2)))
         row = await conn.fetchrow(
-            "INSERT INTO memories (content, importance, source_session, valence, arousal) VALUES ($1, $2, $3, $4, $5) RETURNING id",
-            content, importance, source_session, _val, _aro,
+            "INSERT INTO memories (content, importance, source_session, valence, arousal, is_explicit) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+            content, importance, source_session, _val, _aro, bool(is_explicit),
         )
         
         # MEMORY_VECTOR_ENABLED 时自动计算 embedding
@@ -1516,7 +1516,7 @@ async def get_all_memories_detail(limit: int = None, layer: int = None, active_o
         rows = await conn.fetch(f"""
             SELECT id, content, importance, source_session, created_at,
                    layer, title, is_active, merged_from, event_date, valence, arousal,
-                   drift_day, drift_today, (mw_meta IS NOT NULL) AS is_mw
+                   drift_day, drift_today, is_explicit, (mw_meta IS NOT NULL) AS is_mw
             FROM memories
             {where_clause}
             ORDER BY id

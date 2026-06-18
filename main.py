@@ -1424,6 +1424,7 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 source_session=session_id,
                 valence=mem.get("valence", 0.0),
                 arousal=mem.get("arousal", 0.2),
+                is_explicit=mem.get("is_explicit", False),
             )
             saved += 1
             # ② L5根基：若是【改变关系结构的里程碑】，额外塞进 L5 待审队列（不进 L5 正文，等阮阮审）
