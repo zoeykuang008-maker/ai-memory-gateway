@@ -404,3 +404,80 @@ async def tag_emotions_batch(items: list) -> dict:
     except Exception as e:
         print(f"⚠️  情绪回填出错: {e}")
         return {}
+
+
+EXPLICIT_BACKFILL_PROMPT = """你在给一批记忆打「是否露骨/私密」标记（is_explicit）。
+
+# 判定 is_explicit = true（命中后注入时不会复述原文，只收敛成一句提示）
+- 描述或引用了**具体的性场景/性行为细节**（做了什么、说了什么露骨的话、身体细节、高潮等）
+- 记录了**私密的性相关原话引用**（如把某句露骨的话当内容）
+
+# 判定 is_explicit = false
+- 仅是「他们有亲密/性关系」「某词是暗号」这类**中性事实或暗号释义**（不含场景细节）——这类要 false，好让对方仍能"懂暗号"
+- 日常、情感、技术、玩笑、生活细节等与性场景无关的内容
+
+# 输入（每行：id: 内容）
+{items}
+
+# 输出（只返回 JSON 数组，不要其他文字）
+[{{"id": 数字, "is_explicit": true/false}}]
+"""
+
+
+async def tag_explicit_batch(items: list) -> dict:
+    """给一批已有记忆判 is_explicit（露骨回填用）。
+    items=[{'id':N,'content':...}]；返回 {id(int): bool}；失败返回 {}。"""
+    if not API_KEY or not items:
+        return {}
+    lines = "\n".join(f'{it["id"]}: {str(it.get("content", ""))[:300]}' for it in items)
+    prompt = EXPLICIT_BACKFILL_PROMPT.format(items=lines)
+    try:
+        async with httpx.AsyncClient(timeout=90) as client:
+            response = await client.post(
+                API_BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {get_memory_api_key()}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://midsummer-gateway.local",
+                    "X-Title": "Midsummer Explicit Backfill",
+                },
+                json={
+                    "model": MEMORY_MODEL,
+                    "max_tokens": 3000,
+                    "temperature": 0,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            if response.status_code != 200:
+                print(f"⚠️  露骨回填请求失败: {response.status_code}")
+                return {}
+            text = response.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+            try:
+                arr = json.loads(text)
+            except json.JSONDecodeError:
+                import re
+                m = re.search(r'\[.*\]', text, re.DOTALL)
+                if not m:
+                    print("⚠️  露骨回填结果未找到 JSON 数组")
+                    return {}
+                arr = json.loads(m.group())
+            out = {}
+            if isinstance(arr, list):
+                for o in arr:
+                    if isinstance(o, dict) and "id" in o:
+                        try:
+                            out[int(o["id"])] = bool(o.get("is_explicit", False))
+                        except Exception:
+                            pass
+            print(f"📝 露骨回填判定 {len(out)}/{len(items)} 条")
+            return out
+    except Exception as e:
+        print(f"⚠️  露骨回填出错: {e}")
+        return {}

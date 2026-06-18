@@ -217,6 +217,18 @@ async def init_tables():
             END $$;
         """)
 
+        # is_explicit：露骨/私密标记。命中时不注入原文场景，收敛成一句定向指令（默认 FALSE，提取/回填打标）
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'is_explicit'
+                ) THEN
+                    ALTER TABLE memories ADD COLUMN is_explicit BOOLEAN DEFAULT FALSE;
+                END IF;
+            END $$;
+        """)
+
         # 情绪①-第二步 心情漂移：每条记忆每日漂移次数（防跑飞的「每条每日封顶」用；这两列仅作计数，不碰正文/importance/日期）
         await conn.execute("""
             DO $$ BEGIN
@@ -726,6 +738,52 @@ async def save_memory(content: str, importance: int = 5, source_session: str = "
                     await save_memory_embedding(conn, row['id'], embedding)
             except Exception as e:
                 print(f"⚠️ 记忆 {row['id']} embedding自动计算失败: {e}")
+
+
+# ---- is_explicit 露骨标记（注入收敛 + 回填用）----
+
+async def get_memories_explicit_flags(ids: list) -> dict:
+    """批量查一组记忆的 is_explicit；返回 {id(int): bool}。注入路径仅在收敛开关开启时调用一次。"""
+    if not ids:
+        return {}
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, is_explicit FROM memories WHERE id = ANY($1::int[])", list(ids)
+        )
+        return {r["id"]: bool(r["is_explicit"]) for r in rows}
+
+
+async def set_memory_explicit(memory_id: int, value: bool) -> bool:
+    """置某条记忆的 is_explicit（回填/面板用）。只动这一列，不碰正文/情绪/日期。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            "UPDATE memories SET is_explicit = $1 WHERE id = $2", bool(value), memory_id
+        )
+        return res.endswith("1")
+
+
+async def get_explicit_backfill_candidates(keywords: list, ids: list = None, limit: int = 200) -> list:
+    """收集露骨回填候选：指定 ids，或 content ILIKE 任一 keyword（仅 is_active）。返回 [{id, content}]。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if ids:
+            rows = await conn.fetch(
+                "SELECT id, content FROM memories WHERE id = ANY($1::int[]) AND content IS NOT NULL", list(ids)
+            )
+            return [{"id": r["id"], "content": r["content"]} for r in rows]
+        if not keywords:
+            return []
+        where = " OR ".join(f"content ILIKE '%' || ${i+1} || '%'" for i in range(len(keywords)))
+        params = list(keywords)
+        params.append(limit)
+        rows = await conn.fetch(
+            f"SELECT id, content FROM memories WHERE is_active = TRUE AND content IS NOT NULL AND ({where}) "
+            f"ORDER BY importance DESC, created_at DESC LIMIT ${len(keywords)+1}",
+            *params,
+        )
+        return [{"id": r["id"], "content": r["content"]} for r in rows]
 
 
 # ---- 回忆墙迁移辅助函数 ----
