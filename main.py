@@ -805,7 +805,7 @@ async def generate_dream(session_id: str, date_s: str) -> dict:
         if "openrouter" in API_BASE_URL:
             headers["HTTP-Referer"] = EXTRA_REFERER
             headers["X-Title"] = EXTRA_TITLE
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=240) as client:
             response = await client.post(API_BASE_URL, headers=headers, json={
                 "model": DREAM_MODEL,
                 "max_tokens": 2500,
@@ -813,7 +813,7 @@ async def generate_dream(session_id: str, date_s: str) -> dict:
             })
             if response.status_code != 200:
                 print(f"⚠️ 做梦失败 HTTP {response.status_code}")
-                return None
+                return {"error": f"HTTP {response.status_code}", "convo_chars": len(convo), "raw": (response.text or '')[:200]}
             text = (response.json().get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
             if text.startswith("```json"):
                 text = text[7:]
@@ -829,17 +829,17 @@ async def generate_dream(session_id: str, date_s: str) -> dict:
                 mt = re.search(r'\{.*\}', text, re.DOTALL)
                 if not mt:
                     print(f"⚠️ 做梦结果非JSON: {text[:120]}")
-                    return None
+                    return {"error": "non-JSON", "raw_head": text[:200], "convo_chars": len(convo)}
                 d = json.loads(mt.group())
             if not isinstance(d, dict) or not (d.get("diary") or "").strip():
-                return None
+                return {"error": "empty-diary", "raw_head": text[:200]}
             print(f"💤 做梦生成 {date_s}: 日记{len(d.get('diary',''))}字")
             return {"date": date_s, "diary": d.get("diary", ""), "summary": d.get("summary", ""),
                     "card_title": d.get("card_title", ""), "card_body": d.get("card_body", ""),
                     "source_msgs": convo.count("\n")}
     except Exception as e:
         print(f"⚠️ 做梦异常: {e}")
-        return None
+        return {"error": str(e), "convo_chars": len(convo)}
 
 
 def group_by_rounds(history: list) -> list:
