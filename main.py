@@ -2082,6 +2082,12 @@ async def api_batch_delete(request: Request):
 _emotion_backfill_status = {"running": False, "total": 0, "done": 0, "written": 0,
                             "error": None, "samples": [], "finished_at": None}
 
+# ③-3 复活干碎片 pass 状态（小窗全程 walk + 去重分桶；dry_run 出总账，审过再 dry_run=false 写）
+_revive_status = {"running": False, "dry_run": True, "dates": [], "window": 10, "include_new": True,
+                  "windows_total": 0, "windows_done": 0, "candidates": 0,
+                  "revive": 0, "new": 0, "dup_skip": 0, "written": 0, "inactivated": 0,
+                  "samples": [], "error": None, "finished_at": None}
+
 
 @app.post("/api/memories/backfill-emotion")
 async def api_backfill_emotion(request: Request):
@@ -2209,6 +2215,139 @@ async def api_backfill_explicit(request: Request):
                     samples.append({"id": t["id"], "content": str(t["content"])[:64]})
         await asyncio.sleep(0.2)
     return {"dry_run": dry_run, "candidates": len(candidates), "tagged_explicit": tagged_true, "samples": samples}
+
+
+@app.post("/api/memories/revive-pass")
+async def api_revive_pass(request: Request):
+    """③-3 复活干碎片：小窗(~window)顺序 walk 活跃线指定日期原文 → 铁则一重提取 →
+    每条 revived 候选过 check_duplicate 分桶：
+      · 复活(命中某条「干碎片」默认情绪 0/0.2) → 写 revived + 把那条干碎片置 inactive(replaces，可回滚)
+      · 撞重复(命中已有「好记忆」有情绪) → 跳过
+      · 新增(没命中) → include_new 时写为新富记忆
+    dry_run=true 只统计总账+样例不写。后台跑，/status 轮询。revived 一律 source_session='<sid>-revive'、保留 is_explicit。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    if _revive_status["running"]:
+        return {"error": "复活任务运行中", "status": dict(_revive_status)}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    sid = get_active_session_id()
+    if not sid:
+        return {"error": "无活跃对话线"}
+    window = max(4, int(body.get("window", 10)))
+    dry_run = bool(body.get("dry_run", True))
+    include_new = bool(body.get("include_new", True))
+    req_dates = body.get("dates") or None
+
+    def _ldate(ts):
+        try:
+            if getattr(ts, "tzinfo", None) is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return str((ts + timedelta(hours=TIMEZONE_HOURS)).date())
+        except Exception:
+            return None
+
+    def _is_dry(x):
+        try:
+            v = float(x.get("valence") or 0); a = float(x.get("arousal") or 0.2)
+        except Exception:
+            return False
+        return abs(v) < 0.01 and abs(a - 0.2) < 0.02
+
+    _revive_status.update({"running": True, "dry_run": dry_run, "window": window, "include_new": include_new,
+                           "windows_total": 0, "windows_done": 0, "candidates": 0, "revive": 0, "new": 0,
+                           "dup_skip": 0, "written": 0, "inactivated": 0, "samples": [], "error": None,
+                           "finished_at": None, "dates": []})
+
+    async def _run():
+        try:
+            rows = await get_conversation_messages(sid, limit=10000)
+            by_date = {}
+            for m in rows:
+                d = _ldate(m.get("created_at"))
+                if d:
+                    by_date.setdefault(d, []).append(m)
+            dates = req_dates or sorted(by_date.keys())
+            _revive_status["dates"] = dates
+            _revive_status["windows_total"] = sum(
+                (len(by_date.get(d, [])) + window - 1) // window for d in dates)
+
+            all_mem = await get_all_memories_detail()
+            mem_by_id = {x["id"]: x for x in all_mem}
+
+            for d in dates:
+                day = by_date.get(d, [])
+                for i in range(0, len(day), window):
+                    win = day[i:i + window]
+                    msgs = [{"role": m.get("role"), "content": (m.get("content") or "")}
+                            for m in win if (m.get("content") or "").strip()]
+                    if msgs:
+                        try:
+                            cands = await extract_memories(msgs, existing_memories=None)
+                        except Exception as _ce:
+                            cands = []
+                            print(f"⚠️ revive 窗口提取失败({d} +{i}): {_ce}")
+                        for c in cands:
+                            _revive_status["candidates"] += 1
+                            content = (c.get("content") or "").strip()
+                            if not content or c.get("kind") != "fact":
+                                continue
+                            try:
+                                dup = await check_duplicate_memory(content)
+                            except Exception:
+                                dup = {"is_duplicate": False}
+                            matched = mem_by_id.get(dup.get("matched_id")) if dup.get("is_duplicate") else None
+                            if matched is not None and _is_dry(matched):
+                                _revive_status["revive"] += 1
+                                bucket = "复活"
+                                if not dry_run:
+                                    await save_memory(content, int(c.get("importance", 5) or 5),
+                                                      sid + "-revive", c.get("valence", 0.0),
+                                                      c.get("arousal", 0.2), bool(c.get("is_explicit")))
+                                    if await set_memory_active(int(matched["id"]), False):
+                                        _revive_status["inactivated"] += 1
+                                    _revive_status["written"] += 1
+                                if len([s for s in _revive_status["samples"] if s["bucket"] == "复活"]) < 12:
+                                    _revive_status["samples"].append({
+                                        "bucket": bucket, "revived": content[:90],
+                                        "valence": c.get("valence"), "arousal": c.get("arousal"),
+                                        "is_explicit": bool(c.get("is_explicit")),
+                                        "replaces_dry_id": matched["id"],
+                                        "old_dry": (matched.get("content") or "")[:70]})
+                            elif matched is not None:
+                                _revive_status["dup_skip"] += 1
+                            else:
+                                _revive_status["new"] += 1
+                                if include_new and not dry_run:
+                                    await save_memory(content, int(c.get("importance", 5) or 5),
+                                                      sid + "-revive", c.get("valence", 0.0),
+                                                      c.get("arousal", 0.2), bool(c.get("is_explicit")))
+                                    _revive_status["written"] += 1
+                                if len([s for s in _revive_status["samples"] if s["bucket"] == "新增"]) < 8:
+                                    _revive_status["samples"].append({
+                                        "bucket": "新增", "revived": content[:90],
+                                        "valence": c.get("valence"), "arousal": c.get("arousal"),
+                                        "is_explicit": bool(c.get("is_explicit"))})
+                    _revive_status["windows_done"] += 1
+                    await asyncio.sleep(0.15)
+            _revive_status["finished_at"] = datetime.now(timezone.utc).isoformat()
+            print(f"✅ 复活 pass {'(dry)' if dry_run else '(写)'} 完成: "
+                  f"复活{_revive_status['revive']}/新增{_revive_status['new']}/撞重复{_revive_status['dup_skip']}")
+        except Exception as e:
+            _revive_status["error"] = str(e)
+            print(f"❌ 复活 pass 异常: {e}")
+        finally:
+            _revive_status["running"] = False
+
+    asyncio.create_task(_run())
+    return {"status": "started", "dry_run": dry_run, "window": window, "include_new": include_new}
+
+
+@app.get("/api/memories/revive-pass/status")
+async def api_revive_pass_status():
+    return dict(_revive_status)
 
 
 @app.post("/api/memories/revive-dry")
