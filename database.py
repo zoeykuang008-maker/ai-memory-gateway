@@ -338,6 +338,20 @@ async def init_tables():
             CREATE INDEX IF NOT EXISTS idx_l5_candidates_status ON l5_candidates (status, created_at DESC);
         """)
 
+        # ③-2 做梦：每个过去日一篇第一人称日记 + 当日总结(给昨日桥) + 卡片。dream_date 唯一(幂等)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS dreams (
+                id             SERIAL PRIMARY KEY,
+                dream_date     DATE UNIQUE,
+                diary          TEXT,
+                summary        TEXT,
+                card_title     TEXT,
+                card_body      TEXT,
+                model          TEXT,
+                created_at     TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+
         # 尝试启用pgvector扩展（向量搜索）
         try:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -784,6 +798,59 @@ async def get_explicit_backfill_candidates(keywords: list, ids: list = None, lim
             *params,
         )
         return [{"id": r["id"], "content": r["content"]} for r in rows]
+
+
+# ---- ③-2 做梦 ----
+
+async def save_dream(dream_date: str, diary: str, summary: str = "", card_title: str = "",
+                     card_body: str = "", model: str = "") -> bool:
+    """写/覆盖某天的梦（dream_date 唯一，幂等 upsert）。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO dreams (dream_date, diary, summary, card_title, card_body, model)
+            VALUES ($1::date, $2, $3, $4, $5, $6)
+            ON CONFLICT (dream_date) DO UPDATE SET
+                diary=EXCLUDED.diary, summary=EXCLUDED.summary,
+                card_title=EXCLUDED.card_title, card_body=EXCLUDED.card_body,
+                model=EXCLUDED.model, created_at=NOW()
+        """, dream_date, diary, summary, card_title, card_body, model)
+        return True
+
+
+async def get_dream(dream_date: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT dream_date, diary, summary, card_title, card_body, model, created_at "
+            "FROM dreams WHERE dream_date = $1::date", dream_date)
+        return dict(row) if row else None
+
+
+async def list_dreams(limit: int = 60):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT dream_date, diary, summary, card_title, card_body, model, created_at "
+            "FROM dreams ORDER BY dream_date DESC LIMIT $1", limit)
+        return [dict(r) for r in rows]
+
+
+async def get_dream_dates() -> set:
+    """已有梦的日期集合（YYYY-MM-DD 字符串），用于幂等跳过。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT dream_date FROM dreams")
+        return {str(r["dream_date"]) for r in rows}
+
+
+async def get_memorywall_dates() -> set:
+    """回忆墙已覆盖的事件日期集合（YYYY-MM-DD），做梦时跳过这些日子。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT DISTINCT event_date FROM memories WHERE mw_meta IS NOT NULL AND event_date IS NOT NULL")
+        return {str(r["event_date"]) for r in rows if r["event_date"]}
 
 
 # ---- 回忆墙迁移辅助函数 ----

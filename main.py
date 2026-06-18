@@ -29,6 +29,7 @@ from database import init_tables, close_pool, save_message, search_memories, sav
 from database import save_migrated_memory, find_memory_by_mw_id, save_photo, link_photo_to_memory, get_photo, memory_photo_count, delete_memory_photos, get_mw_meta, update_mw_meta
 from database import list_memorywall, get_memorywall_one, update_memorywall, get_memory_photos, set_memory_active
 from database import get_memories_explicit_flags, set_memory_explicit, get_explicit_backfill_candidates
+from database import save_dream, get_dream, list_dreams, get_dream_dates, get_memorywall_dates
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories, tag_emotions_batch, tag_explicit_batch
@@ -107,6 +108,11 @@ CACHE_PARTITION_X = int(os.getenv("CACHE_PARTITION_X", "15"))
 CACHE_SUMMARY_MODEL = os.getenv("CACHE_SUMMARY_MODEL", "anthropic/claude-haiku-4.5")
 # ③-2 做梦用的模型：默认同摘要模型(haiku,数字证明能保质感)；要更浓质感可 env 调成主力模型
 DREAM_MODEL = os.getenv("DREAM_MODEL", "") or CACHE_SUMMARY_MODEL
+# ③-2 做梦开关：DREAM_ENABLED 总开关；DREAM_RETRIEVABLE 每篇梦顺带写一条可检索回忆墙条目(默认关)
+DREAM_ENABLED = os.getenv("DREAM_ENABLED", "true").lower() == "true"
+DREAM_RETRIEVABLE = os.getenv("DREAM_RETRIEVABLE", "false").lower() == "true"
+_dream_last_date = None  # 上次跑过做梦的本地日(懒触发去重；启动从 gateway_config 恢复)
+_dream_running = False   # 防并发重入
 
 # ② L2今日（非缓存当前轮注入；后台每 N 轮刷一次今日浓缩）
 L2_TODAY_ENABLED = os.getenv("L2_TODAY_ENABLED", "true").lower() == "true"
@@ -356,6 +362,19 @@ async def lifespan(app: FastAPI):
                 if _rd != "":
                     globals()["_EXPLICIT_REDACT"] = (str(_rd).lower() == "true")
                     print(f"🔞 is_explicit 收敛(DB恢复)：{globals()['_EXPLICIT_REDACT']}")
+            except Exception:
+                pass
+
+            # ③-2 做梦：恢复上次跑做梦的日期(懒触发去重)
+            try:
+                _dd = await get_gateway_config("dream_last_date", "")
+                if _dd:
+                    globals()["_dream_last_date"] = str(_dd)
+                    print(f"💤 做梦上次日期(DB恢复)：{_dd}")
+                else:
+                    # 首次启动：设为今天 → 不自动补历史(给"写库前过一眼"留窗口)，往后跨天才自动梦
+                    globals()["_dream_last_date"] = str((datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)).date())
+                    print("💤 做梦首次启动：上次日期=今天(不自动补历史，等手动确认或明日跨天)")
             except Exception:
                 pass
         except Exception as e:
@@ -729,9 +748,14 @@ async def generate_today_digest(session_id: str) -> str:
 async def refresh_l2(session_id: str) -> str:
     """生成并存今日浓缩；跨天则把昨日 today 转成一句桥（临时，L3 上线后撤）。"""
     today_s = str((datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)).date())
-    if _l2_state.get("date") and _l2_state["date"] != today_s and (_l2_state.get("today") or "").strip():
-        prev = _l2_state["today"].strip()
-        _l2_state["bridge"] = (prev.split("。")[0][:120] or prev[:120])
+    if _l2_state.get("date") and _l2_state["date"] != today_s:
+        _yday = _l2_state["date"]  # 刚结束的那天
+        _dy = await get_dream(_yday)
+        if _dy and (_dy.get("summary") or "").strip():
+            _l2_state["bridge"] = _dy["summary"].strip()  # 昨日桥接管：用昨日梦的当日总结
+        elif (_l2_state.get("today") or "").strip():
+            prev = _l2_state["today"].strip()
+            _l2_state["bridge"] = (prev.split("。")[0][:120] or prev[:120])  # 还没梦→回退旧截断
         _l2_state["today"] = ""
     digest = await generate_today_digest(session_id)
     if digest:
@@ -840,6 +864,72 @@ async def generate_dream(session_id: str, date_s: str) -> dict:
     except Exception as e:
         print(f"⚠️ 做梦异常: {e}")
         return {"error": str(e), "convo_chars": len(convo)}
+
+
+async def maybe_run_dreams(session_id: str, dry_run: bool = False, only_dates: list = None) -> list:
+    """③-2 补做过去日期的梦：目标 = 对话表里存在 & < 今天 & 还没梦过 & 没被回忆墙覆盖 的日期。
+    逐日 generate_dream；dry_run=True 只生成返回不写库。补到「昨天」时顺带把昨日桥换成该梦的当日总结。"""
+    global _dream_running
+    if _dream_running and not dry_run:
+        return [{"status": "skip", "reason": "running"}]
+    out = []
+    try:
+        if not dry_run:
+            _dream_running = True
+        rows = await get_conversation_messages(session_id, limit=10000)
+        today_d = (datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)).date()
+        today_s = str(today_d)
+        yest_s = str(today_d - timedelta(days=1))
+        conv_dates = set()
+        for m in rows:
+            ts = m.get("created_at")
+            try:
+                if getattr(ts, "tzinfo", None) is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                conv_dates.add(str((ts + timedelta(hours=TIMEZONE_HOURS)).date()))
+            except Exception:
+                pass
+        have = await get_dream_dates()
+        mw = await get_memorywall_dates()
+        if only_dates:
+            targets = list(only_dates)
+        else:
+            targets = sorted(d for d in conv_dates if d < today_s and d not in have and d not in mw)
+        for d in targets:
+            dr = await generate_dream(session_id, d)
+            if not dr or dr.get("error"):
+                out.append({"date": d, "status": "fail", "error": (dr or {}).get("error")})
+                continue
+            if not dry_run:
+                await save_dream(d, dr.get("diary", ""), dr.get("summary", ""),
+                                 dr.get("card_title", ""), dr.get("card_body", ""), DREAM_MODEL)
+                # 昨日桥接管：补到昨天就把桥换成这篇梦的当日总结
+                if d == yest_s and (dr.get("summary") or "").strip():
+                    _l2_state["bridge"] = dr["summary"].strip()
+                    try:
+                        await set_gateway_config("l2_bridge", _l2_state["bridge"])
+                    except Exception:
+                        pass
+                if DREAM_RETRIEVABLE:
+                    try:
+                        _mw = {"summary": dr.get("summary", ""), "title": dr.get("card_title", ""),
+                               "body": dr.get("diary", ""), "source": "dream"}
+                        await save_migrated_memory(dr.get("diary", "")[:2000], 6, dr.get("card_title", ""),
+                                                   d, None, json.dumps(_mw, ensure_ascii=False))
+                    except Exception as _me:
+                        print(f"⚠️ 梦→回忆墙写入失败 {d}: {_me}")
+            out.append({"date": d, "status": "ok", "diary_len": len(dr.get("diary", "")),
+                        "summary": dr.get("summary", ""), "card_title": dr.get("card_title", ""),
+                        "card_body": dr.get("card_body", ""),
+                        "diary": (dr.get("diary", "") if dry_run else None)})
+        print(f"💤 做梦补做{'(dry)' if dry_run else ''}: ok={len([o for o in out if o.get('status')=='ok'])} 目标={targets}")
+    except Exception as e:
+        out.append({"status": "error", "error": str(e)})
+        print(f"❌ 做梦补做异常: {e}")
+    finally:
+        if not dry_run:
+            _dream_running = False
+    return out
 
 
 def group_by_rounds(history: list) -> list:
@@ -1352,7 +1442,7 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
     assistant_tool_calls: response中assistant的工具调用列表（如果有）
     assistant_reasoning: response中assistant的reasoning_content（deepseek thinking mode）
     """
-    global _round_counter
+    global _round_counter, _dream_last_date
     
     try:
         # Debug: 打印存储分支判断依据
@@ -1429,6 +1519,22 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 asyncio.create_task(refresh_l2(session_id))
             except Exception as _le:
                 print(f"⚠️ L2刷新调度失败: {_le}")
+
+        # ③-2 做梦懒触发：本地日变了(跨天)的第一句话→后台补做未覆盖的过去日(含昨天)。
+        # 请求触发、无需 cron/常驻；维护成本只在跨天那一次。
+        if DREAM_ENABLED:
+            _today_local = str((datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)).date())
+            if _dream_last_date != _today_local:
+                _dream_last_date = _today_local
+                try:
+                    await set_gateway_config("dream_last_date", _today_local)
+                except Exception:
+                    pass
+                try:
+                    asyncio.create_task(maybe_run_dreams(session_id))
+                    print(f"💤 做梦懒触发：新的一天 {_today_local}，后台补做过去日")
+                except Exception as _de:
+                    print(f"⚠️ 做梦调度失败: {_de}")
 
         if MEMORY_EXTRACT_INTERVAL > 1 and (_round_counter % MEMORY_EXTRACT_INTERVAL != 0):
             print(f"⏭️  轮次 {_round_counter}，跳过记忆提取（每 {MEMORY_EXTRACT_INTERVAL} 轮提取一次）")
@@ -2166,12 +2272,6 @@ async def api_batch_delete(request: Request):
 _emotion_backfill_status = {"running": False, "total": 0, "done": 0, "written": 0,
                             "error": None, "samples": [], "finished_at": None}
 
-# ③-3 复活干碎片 pass 状态（小窗全程 walk + 去重分桶；dry_run 出总账，审过再 dry_run=false 写）
-_revive_status = {"running": False, "dry_run": True, "dates": [], "window": 10, "include_new": True,
-                  "windows_total": 0, "windows_done": 0, "candidates": 0,
-                  "revive": 0, "new": 0, "dup_skip": 0, "written": 0, "inactivated": 0,
-                  "samples": [], "error": None, "finished_at": None}
-
 
 @app.post("/api/memories/backfill-emotion")
 async def api_backfill_emotion(request: Request):
@@ -2322,18 +2422,27 @@ async def api_dream_dry(request: Request):
     return {"dry_run": True, "session": sid, "model": DREAM_MODEL, **d}
 
 
-@app.post("/api/memories/revive-pass")
-async def api_revive_pass(request: Request):
-    """③-3 复活干碎片：小窗(~window)顺序 walk 活跃线指定日期原文 → 铁则一重提取 →
-    每条 revived 候选过 check_duplicate 分桶：
-      · 复活(命中某条「干碎片」默认情绪 0/0.2) → 写 revived + 把那条干碎片置 inactive(replaces，可回滚)
-      · 撞重复(命中已有「好记忆」有情绪) → 跳过
-      · 新增(没命中) → include_new 时写为新富记忆
-    dry_run=true 只统计总账+样例不写。后台跑，/status 轮询。revived 一律 source_session='<sid>-revive'、保留 is_explicit。"""
+@app.get("/api/dreams")
+async def api_dreams_list():
+    """③-2 面板日记页：列出所有梦(按日期倒序)。"""
     if not MEMORY_ENABLED:
         return {"error": "记忆系统未启用"}
-    if _revive_status["running"]:
-        return {"error": "复活任务运行中", "status": dict(_revive_status)}
+    try:
+        ds = await list_dreams(limit=120)
+        for d in ds:
+            d["dream_date"] = str(d.get("dream_date"))
+            d["created_at"] = str(d.get("created_at") or "")
+        return {"dreams": ds, "count": len(ds)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/dreams/run")
+async def api_dreams_run(request: Request):
+    """③-2 手动跑做梦补做。body: {dry_run, dates}。dry_run=true 只生成返回(含完整日记)不写库；
+    dates 不给则自动找[对话存在&<今天&无梦&未被回忆墙覆盖]的过去日。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
     try:
         body = await request.json()
     except Exception:
@@ -2341,215 +2450,12 @@ async def api_revive_pass(request: Request):
     sid = get_active_session_id()
     if not sid:
         return {"error": "无活跃对话线"}
-    window = max(4, int(body.get("window", 10)))
     dry_run = bool(body.get("dry_run", True))
-    include_new = bool(body.get("include_new", True))
-    req_dates = body.get("dates") or None
-
-    def _ldate(ts):
-        try:
-            if getattr(ts, "tzinfo", None) is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            return str((ts + timedelta(hours=TIMEZONE_HOURS)).date())
-        except Exception:
-            return None
-
-    def _is_dry(x):
-        try:
-            v = float(x.get("valence") or 0); a = float(x.get("arousal") or 0.2)
-        except Exception:
-            return False
-        return abs(v) < 0.01 and abs(a - 0.2) < 0.02
-
-    _revive_status.update({"running": True, "dry_run": dry_run, "window": window, "include_new": include_new,
-                           "windows_total": 0, "windows_done": 0, "candidates": 0, "revive": 0, "new": 0,
-                           "dup_skip": 0, "written": 0, "inactivated": 0, "samples": [], "error": None,
-                           "finished_at": None, "dates": []})
-
-    async def _run():
-        try:
-            rows = await get_conversation_messages(sid, limit=10000)
-            by_date = {}
-            for m in rows:
-                d = _ldate(m.get("created_at"))
-                if d:
-                    by_date.setdefault(d, []).append(m)
-            dates = req_dates or sorted(by_date.keys())
-            _revive_status["dates"] = dates
-            _revive_status["windows_total"] = sum(
-                (len(by_date.get(d, [])) + window - 1) // window for d in dates)
-
-            all_mem = await get_all_memories_detail()
-            mem_by_id = {x["id"]: x for x in all_mem}
-
-            for d in dates:
-                day = by_date.get(d, [])
-                for i in range(0, len(day), window):
-                    win = day[i:i + window]
-                    msgs = [{"role": m.get("role"), "content": (m.get("content") or "")}
-                            for m in win if (m.get("content") or "").strip()]
-                    if msgs:
-                        try:
-                            cands = await extract_memories(msgs, existing_memories=None)
-                        except Exception as _ce:
-                            cands = []
-                            print(f"⚠️ revive 窗口提取失败({d} +{i}): {_ce}")
-                        for c in cands:
-                            _revive_status["candidates"] += 1
-                            content = (c.get("content") or "").strip()
-                            if not content or c.get("kind") != "fact":
-                                continue
-                            try:
-                                dup = await check_duplicate_memory(content)
-                            except Exception:
-                                dup = {"is_duplicate": False}
-                            matched = mem_by_id.get(dup.get("matched_id")) if dup.get("is_duplicate") else None
-                            if matched is not None and _is_dry(matched):
-                                _revive_status["revive"] += 1
-                                bucket = "复活"
-                                if not dry_run:
-                                    await save_memory(content, int(c.get("importance", 5) or 5),
-                                                      sid + "-revive", c.get("valence", 0.0),
-                                                      c.get("arousal", 0.2), bool(c.get("is_explicit")))
-                                    if await set_memory_active(int(matched["id"]), False):
-                                        _revive_status["inactivated"] += 1
-                                    _revive_status["written"] += 1
-                                if len([s for s in _revive_status["samples"] if s["bucket"] == "复活"]) < 12:
-                                    _revive_status["samples"].append({
-                                        "bucket": bucket, "revived": content[:90],
-                                        "valence": c.get("valence"), "arousal": c.get("arousal"),
-                                        "is_explicit": bool(c.get("is_explicit")),
-                                        "replaces_dry_id": matched["id"],
-                                        "old_dry": (matched.get("content") or "")[:70]})
-                            elif matched is not None:
-                                _revive_status["dup_skip"] += 1
-                            else:
-                                _revive_status["new"] += 1
-                                if include_new and not dry_run:
-                                    await save_memory(content, int(c.get("importance", 5) or 5),
-                                                      sid + "-revive", c.get("valence", 0.0),
-                                                      c.get("arousal", 0.2), bool(c.get("is_explicit")))
-                                    _revive_status["written"] += 1
-                                if len([s for s in _revive_status["samples"] if s["bucket"] == "新增"]) < 8:
-                                    _revive_status["samples"].append({
-                                        "bucket": "新增", "revived": content[:90],
-                                        "valence": c.get("valence"), "arousal": c.get("arousal"),
-                                        "is_explicit": bool(c.get("is_explicit"))})
-                    _revive_status["windows_done"] += 1
-                    await asyncio.sleep(0.15)
-            _revive_status["finished_at"] = datetime.now(timezone.utc).isoformat()
-            print(f"✅ 复活 pass {'(dry)' if dry_run else '(写)'} 完成: "
-                  f"复活{_revive_status['revive']}/新增{_revive_status['new']}/撞重复{_revive_status['dup_skip']}")
-        except Exception as e:
-            _revive_status["error"] = str(e)
-            print(f"❌ 复活 pass 异常: {e}")
-        finally:
-            _revive_status["running"] = False
-
-    asyncio.create_task(_run())
-    return {"status": "started", "dry_run": dry_run, "window": window, "include_new": include_new}
+    dates = body.get("dates") or None
+    res = await maybe_run_dreams(sid, dry_run=dry_run, only_dates=dates)
+    return {"dry_run": dry_run, "active_session": sid, "results": res}
 
 
-@app.get("/api/memories/revive-pass/status")
-async def api_revive_pass_status():
-    return dict(_revive_status)
-
-
-@app.post("/api/memories/revive-dry")
-async def api_revive_dry(request: Request):
-    """③-3 复活干碎片 DRY-RUN（只读·不写）：取活跃线某天原文 → 铁则一(EXTRACTION_PROMPT)重提取
-    → 返回 revived 候选(带情绪/现场/里程碑) + 该天现有"干碎片"对照，供审质感。不调用 save_memory。"""
-    if not MEMORY_ENABLED:
-        return {"error": "记忆系统未启用"}
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    sid = get_active_session_id()
-    if not sid:
-        return {"error": "无活跃对话线"}
-    date_s = (body.get("date") or "").strip()
-    max_msgs = int(body.get("max_msgs", 60))
-    offset = int(body.get("offset", 0))
-
-    rows = await get_conversation_messages(sid, limit=10000)
-    if not rows:
-        return {"error": "无对话"}
-
-    def _local_date(ts):
-        try:
-            if getattr(ts, "tzinfo", None) is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            return str((ts + timedelta(hours=TIMEZONE_HOURS)).date())
-        except Exception:
-            return None
-
-    from collections import OrderedDict
-    by_date = OrderedDict()
-    for m in rows:
-        d = _local_date(m.get("created_at"))
-        if d:
-            by_date.setdefault(d, []).append(m)
-    if not by_date:
-        return {"error": "无可用日期"}
-    if not date_s:
-        date_s = next(iter(by_date))  # 最早一天
-    day_msgs = by_date.get(date_s, [])
-    if not day_msgs:
-        return {"error": f"{date_s} 无对话", "available_dates": list(by_date.keys())[:30]}
-
-    window = day_msgs[offset:offset + max_msgs]
-    msgs_for_extract = [{"role": m.get("role"), "content": (m.get("content") or "")}
-                        for m in window if (m.get("content") or "").strip()]
-
-    all_mem = await get_all_memories_detail()
-
-    def _is_dry(x):
-        try:
-            v = float(x.get("valence") or 0); a = float(x.get("arousal") or 0.2)
-        except Exception:
-            return False
-        return abs(v) < 0.01 and abs(a - 0.2) < 0.02
-    dry_on_day = []
-    for x in all_mem:
-        if x.get("source_session") == sid and _is_dry(x) and _local_date(x.get("created_at")) == date_s:
-            dry_on_day.append({"id": x["id"], "content": (x.get("content") or "")[:80]})
-
-    # 复活：重提取时【不传 existing】——要的就是把同样内容带情绪/现场重做一遍；
-    # 去重/replaces_id(对账干碎片、跳过已有好记忆)留到真·写入 pass 再做。
-    _roles = {}
-    for _m in msgs_for_extract:
-        _roles[_m["role"]] = _roles.get(_m["role"], 0) + 1
-    _dbg = {
-        "roles": _roles,
-        "total_chars": sum(len(_m["content"]) for _m in msgs_for_extract),
-        "sample5": [((_m["role"] or "?") + ":" + (_m["content"] or "")[:50]) for _m in msgs_for_extract[:5]],
-    }
-    try:
-        revived = await extract_memories(msgs_for_extract, existing_memories=None)
-        _dbg["extract_ok"] = True
-    except Exception as _ee:
-        revived = []
-        _dbg["extract_error"] = str(_ee)
-
-    return {
-        "dry_run": True,
-        "active_session": sid,
-        "date": date_s,
-        "day_total_msgs": len(day_msgs),
-        "offset": offset,
-        "window_msgs": len(msgs_for_extract),
-        "available_dates": list(by_date.keys())[:30],
-        "existing_dry_fragments_on_day": dry_on_day[:30],
-        "debug": _dbg,
-        "revived_count": len(revived),
-        "revived_candidates": [
-            {"content": r.get("content"), "kind": r.get("kind"),
-             "valence": r.get("valence"), "arousal": r.get("arousal"),
-             "is_milestone": r.get("is_milestone"), "is_explicit": r.get("is_explicit")}
-            for r in revived
-        ],
-    }
 
 
 # ============================================================

@@ -126,6 +126,9 @@ function switchSection(name) {
     if (name === 'layerview') {
         loadLayerView();
     }
+    if (name === 'dreams') {
+        loadDreams();
+    }
 }
 
 // ============================================
@@ -1024,6 +1027,36 @@ async function loadLayerView() {
         }).join('');
     } catch (e) {
         sum.textContent = '加载失败: ' + e;
+    }
+}
+
+
+// ============================================
+// ③-2 梦境日记
+// ============================================
+async function loadDreams() {
+    const box = document.getElementById('dreams-list');
+    box.textContent = '加载中…';
+    function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+    try {
+        const resp = await fetch('/api/dreams');
+        const data = await resp.json();
+        const ds = data.dreams || [];
+        if (!ds.length) { box.innerHTML = '<div style="color:#999;">还没有梦。小克跨天后会自动补做(或在对话线页手动触发)。</div>'; return; }
+        box.innerHTML = ds.map(function(d) {
+            return '<div class="card" style="margin:10px 0;padding:14px;">'
+                + '<div style="display:flex;justify-content:space-between;align-items:center;">'
+                + '<b>' + esc(d.dream_date) + '</b>'
+                + '<span style="color:var(--text-secondary,#888);font-size:12px;">' + esc(d.model||'') + '</span></div>'
+                + (d.card_title ? '<div style="margin:6px 0;font-weight:600;">【' + esc(d.card_title) + '】</div>' : '')
+                + (d.card_body ? '<div style="color:var(--text-secondary,#666);font-size:13px;margin-bottom:4px;">' + esc(d.card_body) + '</div>' : '')
+                + (d.summary ? '<div style="font-size:13px;margin:6px 0;"><b>当日总结：</b>' + esc(d.summary) + '</div>' : '')
+                + '<details style="margin-top:6px;"><summary style="cursor:pointer;font-size:13px;color:var(--accent,#7a6);">日记全文</summary>'
+                + '<pre style="white-space:pre-wrap;word-break:break-word;font-size:13px;margin:8px 0 0;line-height:1.7;">' + esc(d.diary) + '</pre></details>'
+                + '</div>';
+        }).join('');
+    } catch(e) {
+        box.textContent = '加载失败: ' + e;
     }
 }
 

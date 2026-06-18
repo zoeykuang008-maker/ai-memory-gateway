@@ -51,6 +51,10 @@
                     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/></svg></span>
                     <span class="nav-label">层视图</span>
                 </a>
+                <a href="#" class="nav-item" data-section="dreams">
+                    <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg></span>
+                    <span class="nav-label">梦境日记</span>
+                </a>
             </nav>
             <div class="sidebar-footer">
                 <a href="https://github.com/garan0613/ai-memory-gateway" target="_blank" class="nav-item">
@@ -732,9 +736,19 @@
                     </div>
                 </div>
             </section>
+            <!-- ③-2 梦境日记 -->
+            <section id="section-dreams" class="section">
+                <div class="card settings-card">
+                    <h3 class="settings-group-title">梦境日记（小克回溯补做的过去每一天）</h3>
+                    <div class="settings-field">
+                        <small class="form-hint">小克跨天后自动给「还没被回忆墙覆盖、也还没梦过」的过去日补一篇第一人称日记 + 当日总结(接管昨日桥) + 卡片。这里只读展示。</small>
+                        <div id="dreams-list" style="margin-top:12px;">加载中…</div>
+                    </div>
+                </div>
+            </section>
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=4.2-layerview"></script>
+    <script src="/static/js/dashboard.js?v=4.3-dreams"></script>
 </body>
 </html>
