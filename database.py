@@ -826,6 +826,44 @@ async def get_high_arousal_memories(threshold: float = 0.55) -> list:
                  "valence": float(r["valence"] or 0), "arousal": float(r["arousal"] or 0)} for r in rows]
 
 
+async def get_decay_candidates(age_days: int = 7, imp_max: int = 4,
+                               idle_days: int = 5, arousal_max: float = 0.45,
+                               limit: int = 500) -> list:
+    """②衰减归档候选(只读,供 dry 审):同时满足
+       老(created_at 在 age_days 天前) + 低重要度(importance<=imp_max) +
+       久未取(last_accessed/created_at 在 idle_days 天前) + 低唤起(arousal<arousal_max)
+       + 活跃 + 非回忆墙。高imp/高arousal/近期/被回忆过/回忆墙 天然被排除(珍贵记忆受保护)。
+       age_days/idle_days 在 SQL 内算(避免 import)。里程碑保护:importance 高的不会进。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, content, COALESCE(importance,5) AS importance, layer, "
+            "       COALESCE(arousal,0) AS arousal, COALESCE(valence,0) AS valence, is_explicit, "
+            "       FLOOR(EXTRACT(EPOCH FROM (NOW()-created_at))/86400)::int AS age_days, "
+            "       FLOOR(EXTRACT(EPOCH FROM (NOW()-COALESCE(last_accessed,created_at)))/86400)::int AS idle_days "
+            "FROM memories "
+            "WHERE is_active = TRUE AND mw_meta IS NULL AND content IS NOT NULL AND btrim(content) <> '' "
+            "  AND COALESCE(importance,5) <= $1 "
+            "  AND COALESCE(arousal,0) < $2 "
+            "  AND created_at < NOW() - make_interval(days => $3) "
+            "  AND COALESCE(last_accessed,created_at) < NOW() - make_interval(days => $4) "
+            "ORDER BY COALESCE(importance,5) ASC, age_days DESC LIMIT $5",
+            imp_max, arousal_max, age_days, idle_days, limit)
+        return [{"id": r["id"], "content": r["content"], "importance": int(r["importance"]),
+                 "layer": r["layer"], "arousal": float(r["arousal"]), "valence": float(r["valence"]),
+                 "is_explicit": bool(r["is_explicit"]), "age_days": int(r["age_days"]),
+                 "idle_days": int(r["idle_days"])} for r in rows]
+
+
+async def count_active_memories() -> int:
+    """活跃非回忆墙记忆总数(衰减 dry 报告占比用)。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return int(await conn.fetchval(
+            "SELECT COUNT(*) FROM memories WHERE is_active = TRUE AND mw_meta IS NULL "
+            "AND content IS NOT NULL AND btrim(content) <> ''") or 0)
+
+
 # ---- ③-2 做梦 ----
 
 def _to_date(s):

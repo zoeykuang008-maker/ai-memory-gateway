@@ -29,6 +29,7 @@ from database import init_tables, close_pool, save_message, search_memories, sav
 from database import save_migrated_memory, find_memory_by_mw_id, save_photo, link_photo_to_memory, get_photo, memory_photo_count, delete_memory_photos, get_mw_meta, update_mw_meta
 from database import list_memorywall, get_memorywall_one, update_memorywall, get_memory_photos, set_memory_active
 from database import get_memories_explicit_flags, set_memory_explicit, get_explicit_backfill_candidates, get_high_arousal_memories
+from database import get_decay_candidates, count_active_memories, deactivate_memories
 from database import save_dream, get_dream, list_dreams, get_dream_dates, get_memorywall_dates
 from database import save_feel, get_recent_feels
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate
@@ -128,6 +129,14 @@ FEEL_MODEL = os.getenv("FEEL_MODEL", "") or CACHE_SUMMARY_MODEL
 PROACTIVE_ENABLED = os.getenv("PROACTIVE_ENABLED", "false").lower() == "true"
 PROACTIVE_GAP_HOURS = float(os.getenv("PROACTIVE_GAP_HOURS", "6"))  # 距上条 > 此小时算"长间隔后首轮"
 PROACTIVE_MODEL = os.getenv("PROACTIVE_MODEL", "") or CACHE_SUMMARY_MODEL
+# ②衰减归档：把"老+低重要+久未取+低唤起"的非里程碑碎片归档(is_active=FALSE,可逆),让活跃记忆池保持精炼。
+# 归档=mutate → 默认关,必须先 dry 看会淡掉什么、阮阮定阈值才开(像复活/回填)。高imp/高arousal/近期/被回忆过/回忆墙天然受保护。
+DECAY_ENABLED = os.getenv("DECAY_ENABLED", "false").lower() == "true"
+DECAY_AGE_DAYS = int(os.getenv("DECAY_AGE_DAYS", "7"))             # 占位:created_at 多少天前算"老"
+DECAY_IMP_MAX = int(os.getenv("DECAY_IMP_MAX", "4"))              # 占位:importance<=此值算"低重要"(里程碑/高分受保护)
+DECAY_IDLE_DAYS = int(os.getenv("DECAY_IDLE_DAYS", "5"))          # 占位:多少天没被检索过算"久未取"
+DECAY_AROUSAL_MAX = float(os.getenv("DECAY_AROUSAL_MAX", "0.45")) # 占位:arousal<此值算"低唤起"(情绪浓的受保护)
+_decay_run = {"running": False, "dry_run": True, "archived": 0, "candidates": 0, "error": None, "finished_at": None}
 _dream_last_date = None  # 上次跑过做梦的本地日(懒触发去重；启动从 gateway_config 恢复)
 _dream_running = False   # 防并发重入
 
@@ -415,6 +424,24 @@ async def lifespan(app: FastAPI):
                 if _se != "":
                     globals()["SUMMARY_QUALITY_ENABLED"] = (str(_se).lower() == "true")
                     print(f"📝 保质感摘要开关(DB恢复)：{globals()['SUMMARY_QUALITY_ENABLED']}")
+            except Exception:
+                pass
+            try:
+                _de = await get_gateway_config("decay_enabled", "")
+                if _de != "":
+                    globals()["DECAY_ENABLED"] = (str(_de).lower() == "true")
+                for _k, _g, _cast in [("decay_age_days", "DECAY_AGE_DAYS", int),
+                                      ("decay_imp_max", "DECAY_IMP_MAX", int),
+                                      ("decay_idle_days", "DECAY_IDLE_DAYS", int),
+                                      ("decay_arousal_max", "DECAY_AROUSAL_MAX", float)]:
+                    _v = await get_gateway_config(_k, "")
+                    if _v != "":
+                        try:
+                            globals()[_g] = _cast(_v)
+                        except Exception:
+                            pass
+                if _de != "":
+                    print(f"🍂 衰减归档(DB恢复)：on={globals()['DECAY_ENABLED']} age>={globals()['DECAY_AGE_DAYS']}d imp<={globals()['DECAY_IMP_MAX']} idle>={globals()['DECAY_IDLE_DAYS']}d arousal<{globals()['DECAY_AROUSAL_MAX']}")
             except Exception:
                 pass
         except Exception as e:
@@ -3091,6 +3118,139 @@ async def api_rejudge_explicit(request: Request):
 @app.get("/api/memories/rejudge-explicit/status")
 async def api_rejudge_explicit_status():
     return dict(_rejudge_status)
+
+
+# ---- ②衰减归档：dry(只读看会淡掉谁) + 状态 + toggle(定阈值/开关) + run(mutate,gated) + undo(可逆兜底) ----
+
+def _decay_thresholds(body=None) -> dict:
+    """取阈值:body 给了就覆盖(阮阮试不同值),否则用当前全局(占位/已定的)。"""
+    b = body or {}
+    def _i(k, d):
+        try:
+            v = b.get(k)
+            return int(v) if (v is not None and str(v) != "") else d
+        except Exception:
+            return d
+    def _f(k, d):
+        try:
+            v = b.get(k)
+            return float(v) if (v is not None and str(v) != "") else d
+        except Exception:
+            return d
+    return {"age_days": _i("age_days", DECAY_AGE_DAYS), "imp_max": _i("imp_max", DECAY_IMP_MAX),
+            "idle_days": _i("idle_days", DECAY_IDLE_DAYS), "arousal_max": _f("arousal_max", DECAY_AROUSAL_MAX)}
+
+
+@app.get("/api/memories/decay")
+async def api_decay_status():
+    return {"decay_enabled": DECAY_ENABLED, "age_days": DECAY_AGE_DAYS, "imp_max": DECAY_IMP_MAX,
+            "idle_days": DECAY_IDLE_DAYS, "arousal_max": DECAY_AROUSAL_MAX,
+            "note": "归档=mutate,默认关;高imp/高arousal/近期/被回忆过/回忆墙受保护;归档=is_active FALSE,可逆"}
+
+
+@app.post("/api/memories/decay-dry")
+async def api_decay_dry(request: Request):
+    """②衰减 dry(只读):按阈值列出"会被归档淡化"的记忆,不动任何数据。
+    body 可覆盖阈值:{age_days, imp_max, idle_days, arousal_max}。给阮阮审/调阈值用。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    th = _decay_thresholds(body)
+    try:
+        total = await count_active_memories()
+        cands = await get_decay_candidates(th["age_days"], th["imp_max"], th["idle_days"], th["arousal_max"], limit=1000)
+        items = [{"id": c["id"], "head": (c["content"][:60] + ("…" if len(c["content"]) > 60 else "")),
+                  "importance": c["importance"], "layer": c["layer"], "arousal": round(c["arousal"], 2),
+                  "age_days": c["age_days"], "idle_days": c["idle_days"], "is_explicit": c["is_explicit"]}
+                 for c in cands]
+        n = len(items)
+        return {"thresholds": th, "active_total": total, "would_archive": n,
+                "pct": (round(100.0 * n / total, 1) if total else 0.0),
+                "criteria": f"老>={th['age_days']}天 且 importance<={th['imp_max']} 且 久未取>={th['idle_days']}天 且 arousal<{th['arousal_max']}",
+                "protected": "高imp/高arousal/近期/被回忆过/回忆墙 均不在此列",
+                "candidates": items}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/memories/decay/toggle")
+async def api_decay_toggle(request: Request):
+    """开关 + 设阈值(持久化 gateway_config、启动恢复)。body:{enabled, age_days, imp_max, idle_days, arousal_max}。
+    阮阮定的阈值在这里落库;enabled=true 才允许 run 真归档。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    th = _decay_thresholds(body)
+    globals()["DECAY_AGE_DAYS"] = th["age_days"]; await set_gateway_config("decay_age_days", str(th["age_days"]))
+    globals()["DECAY_IMP_MAX"] = th["imp_max"]; await set_gateway_config("decay_imp_max", str(th["imp_max"]))
+    globals()["DECAY_IDLE_DAYS"] = th["idle_days"]; await set_gateway_config("decay_idle_days", str(th["idle_days"]))
+    globals()["DECAY_AROUSAL_MAX"] = th["arousal_max"]; await set_gateway_config("decay_arousal_max", str(th["arousal_max"]))
+    if "enabled" in body:
+        val = bool(body.get("enabled"))
+        globals()["DECAY_ENABLED"] = val
+        await set_gateway_config("decay_enabled", "true" if val else "false")
+    return {"status": "ok", "decay_enabled": DECAY_ENABLED, "age_days": DECAY_AGE_DAYS,
+            "imp_max": DECAY_IMP_MAX, "idle_days": DECAY_IDLE_DAYS, "arousal_max": DECAY_AROUSAL_MAX}
+
+
+@app.post("/api/memories/decay/run")
+async def api_decay_run(request: Request):
+    """跑一次衰减归档。body:{dry_run:true}(默认 true=只看不动)。
+    dry_run=false:必须 DECAY_ENABLED=true(gated),才把候选 deactivate(is_active=FALSE,可逆)。
+    归档的 id 存 gateway_config[decay_last_batch],可 /decay/undo-last 复活。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    dry = bool(body.get("dry_run", True))
+    th = _decay_thresholds(body)
+    try:
+        cands = await get_decay_candidates(th["age_days"], th["imp_max"], th["idle_days"], th["arousal_max"], limit=2000)
+        ids = [c["id"] for c in cands]
+        if dry:
+            return {"dry_run": True, "would_archive": len(ids), "thresholds": th, "ids": ids[:200]}
+        if not DECAY_ENABLED:
+            return {"error": "DECAY_ENABLED=false,真归档被闸住。先 /api/memories/decay/toggle {enabled:true} 由阮阮定阈值开启。",
+                    "would_archive": len(ids)}
+        if not ids:
+            return {"dry_run": False, "archived": 0, "note": "无候选"}
+        await deactivate_memories(ids)
+        await set_gateway_config("decay_last_batch", json.dumps(ids))
+        _decay_run["archived"] = len(ids); _decay_run["finished_at"] = datetime.now(timezone.utc).isoformat()
+        return {"dry_run": False, "archived": len(ids), "thresholds": th, "ids": ids,
+                "undo": "如需复活:POST /api/memories/decay/undo-last"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/memories/decay/undo-last")
+async def api_decay_undo():
+    """把最近一次衰减归档的那批 id 复活(is_active=TRUE)。可逆性兜底。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        raw = await get_gateway_config("decay_last_batch", "")
+        ids = json.loads(raw) if raw else []
+        if not ids:
+            return {"status": "ok", "reactivated": 0, "note": "无可复活批次"}
+        ok = 0
+        for mid in ids:
+            try:
+                await set_memory_active(int(mid), True); ok += 1
+            except Exception:
+                pass
+        await set_gateway_config("decay_last_batch", "")
+        return {"status": "ok", "reactivated": ok}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/api/dreams")
