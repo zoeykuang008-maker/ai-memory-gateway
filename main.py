@@ -1075,11 +1075,19 @@ async def generate_feel(messages: list) -> dict:
         return {"feel": "", "is_explicit": False}
 
 
+def _looks_explicit(text: str) -> bool:
+    """词法兜底：内容像露骨/私密(命中露骨词或身体禁词)。补 is_explicit 标记的漏网(回填没标全的)。"""
+    t = text or ""
+    return any(w in t for w in EXPLICIT_LEXICON) or any(w in t for w in _DIGEST_BAN)
+
+
 async def pick_proactive_candidates(session_id: str) -> list:
-    """④ 主动浮现候选(中性开头→只取非露骨)：feel(想说的) / dream(想说的) / 高arousal非露骨记忆(说过的)。"""
+    """④ 主动浮现候选(中性开头→只取非露骨)：feel(想说的) / dream(想说的) / 高arousal非露骨记忆(说过的)。
+    双保险：is_explicit 标记 + _looks_explicit 词法兜底,两道都过才算非露骨(中性开头绝不浮露骨)。"""
     out = []
     try:
-        fs = [f for f in await get_recent_feels(session_id, 8) if not f.get("is_explicit")]
+        fs = [f for f in await get_recent_feels(session_id, 8)
+              if not f.get("is_explicit") and not _looks_explicit(f.get("content"))]
         for f in fs[-2:]:
             if (f.get("content") or "").strip():
                 out.append({"source": "feel·想说的", "line": f["content"].strip()})
@@ -1088,14 +1096,14 @@ async def pick_proactive_candidates(session_id: str) -> list:
     try:
         for d in await list_dreams(3):
             s = ((d.get("summary") or "") or (d.get("card_title") or "")).strip()
-            if s:
+            if s and not _looks_explicit(s):
                 out.append({"source": "dream·想说的", "line": s})
     except Exception:
         pass
     try:
         mem = await get_all_memories_detail(active_only=True)
-        hi = [m for m in mem if not m.get("is_explicit") and float(m.get("arousal") or 0) >= 0.6
-              and not m.get("is_mw") and (m.get("content") or "").strip()]
+        hi = [m for m in mem if not m.get("is_explicit") and not _looks_explicit(m.get("content"))
+              and float(m.get("arousal") or 0) >= 0.6 and not m.get("is_mw") and (m.get("content") or "").strip()]
         hi.sort(key=lambda m: float(m.get("arousal") or 0), reverse=True)
         for m in hi[:3]:
             out.append({"source": "memory·说过的(高情绪)", "line": (m.get("content") or "").strip()[:80],
