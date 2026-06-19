@@ -111,6 +111,9 @@ function switchSection(name) {
     if (name === 'home') {
         loadHome();
     }
+    if (name === 'feel') {
+        loadFeel();
+    }
     if (name === 'export') {
         loadExportStats();
     }
@@ -2618,15 +2621,84 @@ async function loadHome() {
     startECG();
 }
 
+// ── 房间导航:塔罗牌即入口,侧栏各项收束进房(房内子页=Tab)。现有 section 一个不丢,只重新归位 ──
+const ROOMS = {
+    memory:     { title: '记忆',   tabs: [['manage', '记忆管理']] },
+    moment:     { title: '此刻',   tabs: [['layerview', '层视图·此刻所见'], ['feel', '感受流']] },
+    dreams:     { title: '梦境',   tabs: [['dreams', '梦境日记']] },
+    foundation: { title: '根基',   tabs: [['settings', '里程碑·档案·人设']] },
+    wall:       { title: '回忆墙', tabs: [['memorywall', '回忆墙']] },
+    console:    { title: '操作间', tabs: [['__console', '控制台旋钮 ↗'], ['settings', '设置'], ['import', '导入'], ['export', '导出'], ['threads', '记忆线'], ['conversations', '对话记录'], ['persona', '人设建议']] },
+};
+const ROOM_ORDER = ['memory', 'moment', 'dreams', 'foundation', 'wall', 'console'];
+let _curRoom = null;
+
+function _esc(s) { return (s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
 function initRooms() {
     document.querySelectorAll('#section-home .room').forEach(el => {
-        el.addEventListener('click', () => {
-            const room = el.dataset.room;
-            if (room === 'console') { window.location.href = '/console' + window.location.search; return; }
-            switchSection(room);
-            window.scrollTo({ top: 0, behavior: 'smooth' });
-        });
+        el.addEventListener('click', () => enterRoom(el.dataset.room));
     });
+    const rh = document.getElementById('rb-home');
+    if (rh) rh.addEventListener('click', (e) => { e.preventDefault(); goHome(); });
+}
+
+function enterRoom(key) {
+    const room = ROOMS[key];
+    if (!room) return;
+    _curRoom = key;
+    document.getElementById('room-bar').style.display = 'flex';
+    document.getElementById('rb-title').textContent = room.title;
+    // 子页 Tab
+    const tabsEl = document.getElementById('rb-tabs');
+    tabsEl.innerHTML = '';
+    let firstSec = null;
+    room.tabs.forEach(([sec, label]) => {
+        const b = document.createElement('button');
+        b.className = 'rb-tab';
+        b.textContent = label;
+        b.onclick = () => {
+            if (sec === '__console') { window.location.href = '/console' + window.location.search; return; }
+            tabsEl.querySelectorAll('.rb-tab').forEach(x => x.classList.remove('active'));
+            b.classList.add('active');
+            switchSection(sec);
+            window.scrollTo({ top: 0 });
+        };
+        tabsEl.appendChild(b);
+        if (firstSec === null && sec !== '__console') { firstSec = sec; b.classList.add('active'); }
+    });
+    // 切房（细金点）
+    const sw = document.getElementById('rb-switch');
+    sw.innerHTML = '';
+    ROOM_ORDER.forEach(rk => {
+        const d = document.createElement('span');
+        d.className = 'rb-dot' + (rk === key ? ' cur' : '');
+        d.title = ROOMS[rk].title;
+        d.onclick = () => enterRoom(rk);
+        sw.appendChild(d);
+    });
+    if (firstSec) switchSection(firstSec);
+    window.scrollTo({ top: 0 });
+}
+
+function goHome() {
+    _curRoom = null;
+    document.getElementById('room-bar').style.display = 'none';
+    switchSection('home');
+    window.scrollTo({ top: 0 });
+}
+
+async function loadFeel() {
+    const el = document.getElementById('feel-stream');
+    if (!el) return;
+    el.innerHTML = '<div class="feel-empty">读取中…</div>';
+    try {
+        const r = await fetch('/api/feels');
+        const j = await r.json();
+        const fs = j.feels || [];
+        if (!fs.length) { el.innerHTML = '<div class="feel-empty">还没有 feel（开了 feel 开关后，小克每隔几轮会留一句「留在心里的」）。</div>'; return; }
+        el.innerHTML = fs.map(f => `<div class="feel-card${f.is_explicit ? ' exp' : ''}">${f.is_explicit ? '<span class="feel-tag">私密</span>' : ''}${_esc(f.content)}</div>`).join('');
+    } catch (e) { el.innerHTML = '<div class="feel-empty">加载失败：' + _esc(e.message) + '</div>'; }
 }
 
 // 心跳 ECG：速度/振幅随 arousal（当下越激动跳得越快越高）；线条金色，与主题一致

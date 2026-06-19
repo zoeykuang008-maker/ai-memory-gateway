@@ -5253,6 +5253,19 @@ async def api_home():
     return out
 
 
+@app.get("/api/feels")
+async def api_feels(limit: int = 40):
+    """感受流(此刻房):小克最近留下的一句句 feel(新→旧)。只读,不进检索。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        rows = list(reversed(await get_recent_feels(get_active_session_id(), limit)))
+        return {"feels": [{"content": r.get("content", ""), "is_explicit": bool(r.get("is_explicit"))}
+                          for r in rows], "count": len(rows)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ============================================================
 
 if __name__ == "__main__":

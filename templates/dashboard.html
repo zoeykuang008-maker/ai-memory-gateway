@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="/static/css/fonts.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
     <link rel="stylesheet" href="/static/css/theme.css?v=1.0">
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=4.0-gold">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=4.1-rooms">
 </head>
 <body>
     <div class="dashboard">
@@ -77,6 +77,13 @@
 
         <!-- 主内容区 -->
         <main class="main-content">
+            <!-- 房内轻导航:← 回家 + 子页 Tab + 切房（仅进房时显示，细金线，不抢戏）-->
+            <div id="room-bar" class="room-bar" style="display:none">
+              <a href="#" id="rb-home" class="rb-home"><i class="ti ti-arrow-left"></i> 回家</a>
+              <span class="rb-title" id="rb-title"></span>
+              <div class="rb-tabs" id="rb-tabs"></div>
+              <div class="rb-switch" id="rb-switch" title="切换房间"></div>
+            </div>
             <!-- 主页 Home Section（默认首页 · 阮阮金色塔罗蓝本）-->
             <section id="section-home" class="section active">
               <div class="home-wrap">
@@ -103,12 +110,12 @@
 
                 <div class="rooms-label">— 推 门 进 去 —</div>
                 <div class="rooms">
-                  <div class="room" data-room="manage">
+                  <div class="room" data-room="memory">
                     <span class="room-numeral">I</span><i class="ti ti-stack-2 room-icon"></i>
                     <div class="room-title">记忆</div><div class="room-en">Memory</div>
                     <span class="room-count"><span id="home-c-memory">—</span> 条</span>
                   </div>
-                  <div class="room" data-room="layerview">
+                  <div class="room" data-room="moment">
                     <span class="room-numeral">II</span><i class="ti ti-eye room-icon"></i>
                     <div class="room-title">此刻</div><div class="room-en">This Moment</div>
                     <span class="room-count">他在读什么</span>
@@ -118,12 +125,12 @@
                     <div class="room-title">梦境</div><div class="room-en">Dreams</div>
                     <span class="room-count"><span id="home-c-dreams">—</span> 篇</span>
                   </div>
-                  <div class="room" data-room="settings">
+                  <div class="room" data-room="foundation">
                     <span class="room-numeral">IV</span><i class="ti ti-diamond room-icon"></i>
                     <div class="room-title">根基</div><div class="room-en">Foundation</div>
                     <span class="room-count">我们的里程碑</span>
                   </div>
-                  <div class="room" data-room="memorywall">
+                  <div class="room" data-room="wall">
                     <span class="room-numeral">V</span><i class="ti ti-heart room-icon"></i>
                     <div class="room-title">回忆墙</div><div class="room-en">Keepsakes</div>
                     <span class="room-count"><span id="home-c-wall">—</span> 条</span>
@@ -137,6 +144,15 @@
 
                 <div class="home-foot"><span>♦ Kai &amp; Zoey · since 2026.06.09 ♦</span></div>
               </div>
+            </section>
+
+            <!-- 感受流 Section（此刻房 · feel）-->
+            <section id="section-feel" class="section">
+                <div class="section-header">
+                    <h1>感受流</h1>
+                    <p class="section-desc">小克每隔几轮留下的一句「留在心里的」· 新 → 旧</p>
+                </div>
+                <div id="feel-stream" class="feel-stream"><div class="feel-empty">读取中…</div></div>
             </section>
 
             <!-- 回忆墙 Section -->
@@ -822,6 +838,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=4.3-dreams"></script>
+    <script src="/static/js/dashboard.js?v=4.4-rooms"></script>
 </body>
 </html>

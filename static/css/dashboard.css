@@ -1400,3 +1400,28 @@ body{font-family:var(--sans,-apple-system,'PingFang SC','Microsoft YaHei',sans-s
 ::-webkit-scrollbar-track{background:var(--bg);}
 ::-webkit-scrollbar-thumb{background:rgba(197,165,90,0.28);border-radius:5px;}
 ::-webkit-scrollbar-thumb:hover{background:rgba(197,165,90,0.45);}
+
+/* ============================================================
+   房间导航重构:砍侧栏 → 塔罗牌即导航;房内细金线轻导航(回家+子页Tab+切房)
+   ============================================================ */
+.sidebar{display:none!important;}
+.main-content{margin-left:0!important;max-width:1100px;margin-right:auto;}
+.room-bar{display:flex;align-items:center;gap:14px;margin:0 0 22px;padding:8px 2px 12px;border-bottom:.5px solid var(--gold-dim);font-family:var(--serif);flex-wrap:wrap;}
+.rb-home{color:var(--text-muted);text-decoration:none;font-size:13px;letter-spacing:2px;display:inline-flex;align-items:center;gap:5px;transition:.3s;white-space:nowrap;}
+.rb-home:hover{color:var(--primary-light);}
+.rb-home i{font-size:15px;}
+.rb-title{font-size:17px;letter-spacing:4px;color:var(--primary-light);}
+.rb-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-left:4px;}
+.rb-tab{font-family:var(--serif);font-size:12.5px;letter-spacing:1px;color:var(--text-muted);padding:4px 13px;border:.5px solid transparent;border-radius:2px;cursor:pointer;transition:.25s;background:none;}
+.rb-tab:hover{color:var(--primary-light);}
+.rb-tab.active{color:var(--primary-light);border-color:var(--gold-dim);background:rgba(197,165,90,.07);}
+.rb-switch{margin-left:auto;display:flex;gap:7px;align-items:center;}
+.rb-dot{width:9px;height:9px;border-radius:50%;border:.5px solid var(--gold-dim);background:transparent;cursor:pointer;transition:.25s;}
+.rb-dot:hover{background:var(--gold-dim);}
+.rb-dot.cur{background:var(--primary);border-color:var(--primary);}
+/* 感受流(此刻房)*/
+.feel-stream{display:flex;flex-direction:column;gap:12px;max-width:680px;}
+.feel-card{position:relative;padding:15px 20px;border:.5px solid var(--gold-dim);border-radius:2px;background:linear-gradient(135deg,rgba(15,21,37,.7),rgba(8,12,24,.85));font-family:var(--serif);font-size:16px;font-style:italic;line-height:1.8;color:var(--text);}
+.feel-card.exp{opacity:.45;}
+.feel-card .feel-tag{position:absolute;top:8px;right:10px;font-size:9px;font-style:normal;letter-spacing:1px;color:var(--danger);border:.5px solid var(--danger);border-radius:3px;padding:0 5px;}
+.feel-empty{color:var(--text-muted);font-size:13px;padding:20px;}
