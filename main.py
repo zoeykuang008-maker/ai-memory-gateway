@@ -2898,6 +2898,37 @@ async def api_summary_dry(request: Request):
             "old_thirdperson": old_s, "old_len": len(old_s or "")}
 
 
+@app.post("/api/summary/scrub-existing")
+async def api_summary_scrub_existing(request: Request):
+    """⑤(a) 把活跃线现有 summary_parts 残留的露骨 scrub 掉(_scrub:去露骨、段落仍连贯)。
+    dry_run=true 只看 before/after 不写；false 写回 session_cache_state(那几段一次性缓存重建)。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    sid = get_active_session_id()
+    if not sid:
+        return {"error": "无活跃对话线"}
+    dry_run = bool(body.get("dry_run", True))
+    state = await get_session_cache_state(sid)
+    parts = state.get("summary_parts") or []
+    a_start = state.get("a_start_round", 0)
+    out, new_parts, changed = [], [], 0
+    for i, p in enumerate(parts):
+        sc = await _scrub_digest_explicit(p)
+        new_parts.append(sc)
+        ch = (sc != p)
+        if ch:
+            changed += 1
+        out.append({"i": i, "changed": ch, "before_len": len(p), "after_len": len(sc),
+                    "before_head": (p or "")[:110], "after": sc})
+    if not dry_run and changed:
+        await save_session_cache_state(sid, new_parts, a_start)
+    return {"dry_run": dry_run, "session": sid, "parts": len(parts), "changed": changed, "details": out}
+
+
 @app.post("/api/l2/dry")
 async def api_l2_dry(request: Request):
     """L2 dry-run（只读·不写）：用新 prompt 对活跃线今天跑一遍 generate_today_digest，看新样子。"""
