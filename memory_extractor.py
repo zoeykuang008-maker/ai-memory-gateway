@@ -113,6 +113,8 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
     for msg in messages:
         role = msg.get("role", "unknown")
         content = msg.get("content", "")
+        if isinstance(content, list):  # 多模态兜底:只取文本块、丢图片(image_url 的 base64),否则灌爆提取 prompt→不出碎片
+            content = " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
         if role == "user":
             conversation_text += f"用户: {content}\n"
         elif role == "assistant":

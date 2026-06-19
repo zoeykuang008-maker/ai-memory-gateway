@@ -1340,6 +1340,20 @@ def _decode_data_uri(uri: str):
         return (None, None)
 
 
+def _msgs_text_only(messages: list) -> list:
+    """把消息里的多模态 content(list:文本+图)拍成纯文本——丢 image_url(base64)、只留文本。
+    供记忆提取 / feel:绝不让图的 base64 灌进 haiku prompt(否则提取 prompt 被刷爆→吐不出记忆碎片)。"""
+    out = []
+    for m in (messages or []):
+        c = m.get("content")
+        if isinstance(c, list):
+            txt = " ".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+            out.append({**m, "content": txt})
+        else:
+            out.append(m)
+    return out
+
+
 def _extract_image_uris(messages: list) -> list:
     """从最近一条 user 消息抽出 image_url(data uri)。供看图记忆。"""
     for m in reversed(messages or []):
@@ -2017,6 +2031,8 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 {"role": "assistant", "content": assistant_msg},
             ]
         
+        messages_for_extraction = _msgs_text_only(messages_for_extraction)  # 多模态兜底:绝不把图 base64 喂提取/feel(否则不出碎片)
+
         new_memories = await extract_memories(messages_for_extraction, existing_memories=existing_contents)
 
         # ③-1 feel：同一段顺带写一句"留在你心里的感受"(单独存、不衰减；默认关到验收)
