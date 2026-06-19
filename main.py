@@ -28,7 +28,7 @@ from fastapi.templating import Jinja2Templates
 from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, apply_mood_drift, get_emotion_backfill_targets, update_emotion_only, update_memory_emotion
 from database import save_migrated_memory, find_memory_by_mw_id, save_photo, link_photo_to_memory, get_photo, memory_photo_count, delete_memory_photos, get_mw_meta, update_mw_meta
 from database import list_memorywall, get_memorywall_one, update_memorywall, get_memory_photos, set_memory_active
-from database import get_memories_explicit_flags, set_memory_explicit, get_explicit_backfill_candidates
+from database import get_memories_explicit_flags, set_memory_explicit, get_explicit_backfill_candidates, get_high_arousal_memories
 from database import save_dream, get_dream, list_dreams, get_dream_dates, get_memorywall_dates
 from database import save_feel, get_recent_feels
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate
@@ -2822,6 +2822,78 @@ async def api_proactive_dry(request: Request):
         op = await generate_opening(c["line"])
         out.append({"source": c["source"], "line": c["line"][:60], "opening": op})
     return {"dry_run": True, "session": sid, "model": PROACTIVE_MODEL, "count": len(out), "candidates": out}
+
+
+_rejudge_status = {"running": False, "dry_run": True, "total": 0, "done": 0,
+                   "to_true": 0, "to_false": 0, "unchanged": 0, "samples": [],
+                   "error": None, "finished_at": None}
+
+
+@app.post("/api/memories/rejudge-explicit")
+async def api_rejudge_explicit(request: Request):
+    """堵 is_explicit 漏标洞：对所有高 arousal 记忆用 haiku **语义**重判 is_explicit(认得出'碾过前壁'露骨、
+    '风留在根里快哭'温柔)。dry_run=true 只出三桶(新标TRUE/撤标FALSE/不变)+样例不写；后台跑、/status 轮询。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    if _rejudge_status["running"]:
+        return {"error": "重判任务运行中", "status": dict(_rejudge_status)}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    dry_run = bool(body.get("dry_run", True))
+    threshold = float(body.get("threshold", 0.55))
+    batch_size = int(body.get("batch_size", 20))
+    _rejudge_status.update({"running": True, "dry_run": dry_run, "total": 0, "done": 0,
+                            "to_true": 0, "to_false": 0, "unchanged": 0, "samples": [],
+                            "error": None, "finished_at": None})
+
+    async def _run():
+        try:
+            mems = await get_high_arousal_memories(threshold)
+            _rejudge_status["total"] = len(mems)
+            for i in range(0, len(mems), batch_size):
+                batch = mems[i:i + batch_size]
+                verdict = await tag_explicit_batch([{"id": m["id"], "content": m["content"]} for m in batch])
+                for m in batch:
+                    _rejudge_status["done"] += 1
+                    v = verdict.get(m["id"])
+                    if v is None:
+                        continue  # 判别缺失→不动(safe)
+                    cur = m["is_explicit"]
+                    samp = {"id": m["id"], "a": round(m["arousal"], 2), "v": round(m["valence"], 2), "c": m["content"][:72]}
+                    if v and not cur:
+                        _rejudge_status["to_true"] += 1
+                        if not dry_run:
+                            await set_memory_explicit(m["id"], True)
+                        if len([s for s in _rejudge_status["samples"] if s["b"] == "新标TRUE"]) < 30:
+                            _rejudge_status["samples"].append({"b": "新标TRUE", **samp})
+                    elif (not v) and cur:
+                        _rejudge_status["to_false"] += 1
+                        if not dry_run:
+                            await set_memory_explicit(m["id"], False)
+                        if len([s for s in _rejudge_status["samples"] if s["b"] == "撤标FALSE"]) < 30:
+                            _rejudge_status["samples"].append({"b": "撤标FALSE", **samp})
+                    else:
+                        _rejudge_status["unchanged"] += 1
+                        if (not v) and len([s for s in _rejudge_status["samples"] if s["b"] == "保持FALSE(温柔验)"]) < 12:
+                            _rejudge_status["samples"].append({"b": "保持FALSE(温柔验)", **samp})
+                await asyncio.sleep(0.2)
+            _rejudge_status["finished_at"] = datetime.now(timezone.utc).isoformat()
+            print(f"✅ is_explicit 重判{'(dry)' if dry_run else ''}: +TRUE {_rejudge_status['to_true']}/-FALSE {_rejudge_status['to_false']}/不变 {_rejudge_status['unchanged']}")
+        except Exception as e:
+            _rejudge_status["error"] = str(e)
+            print(f"❌ is_explicit 重判异常: {e}")
+        finally:
+            _rejudge_status["running"] = False
+
+    asyncio.create_task(_run())
+    return {"status": "started", "dry_run": dry_run, "threshold": threshold}
+
+
+@app.get("/api/memories/rejudge-explicit/status")
+async def api_rejudge_explicit_status():
+    return dict(_rejudge_status)
 
 
 @app.get("/api/dreams")

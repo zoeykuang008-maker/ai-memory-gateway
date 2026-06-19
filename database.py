@@ -814,6 +814,18 @@ async def get_explicit_backfill_candidates(keywords: list, ids: list = None, lim
         return [{"id": r["id"], "content": r["content"]} for r in rows]
 
 
+async def get_high_arousal_memories(threshold: float = 0.55) -> list:
+    """高 arousal 活跃非回忆墙记忆(含当前 is_explicit/valence/arousal)，供语义重判 is_explicit(堵漏标洞)。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, content, is_explicit, valence, arousal FROM memories "
+            "WHERE is_active = TRUE AND mw_meta IS NULL AND content IS NOT NULL AND btrim(content) <> '' "
+            "AND arousal >= $1 ORDER BY arousal DESC", threshold)
+        return [{"id": r["id"], "content": r["content"], "is_explicit": bool(r["is_explicit"]),
+                 "valence": float(r["valence"] or 0), "arousal": float(r["arousal"] or 0)} for r in rows]
+
+
 # ---- ③-2 做梦 ----
 
 def _to_date(s):
