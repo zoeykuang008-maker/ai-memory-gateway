@@ -114,6 +114,8 @@ PERSONA_SUGGESTION_MIN_IMPORTANCE = int(os.getenv("PERSONA_SUGGESTION_MIN_IMPORT
 CACHE_PARTITION_ENABLED = os.getenv("CACHE_PARTITION_ENABLED", "false").lower() == "true"
 CACHE_PARTITION_X = int(os.getenv("CACHE_PARTITION_X", "15"))
 CACHE_SUMMARY_MODEL = os.getenv("CACHE_SUMMARY_MODEL", "anthropic/claude-haiku-4.5")
+# ⑤ 保质感摘要：A区摘要从第三人称干摘要→保质感(铁则一)。默认关(碰分区缓存主链路,验过再开)；开时新摘要过 _scrub 防露骨入常驻缓存
+SUMMARY_QUALITY_ENABLED = os.getenv("SUMMARY_QUALITY_ENABLED", "false").lower() == "true"
 # ③-2 做梦用的模型：默认同摘要模型(haiku,数字证明能保质感)；要更浓质感可 env 调成主力模型
 DREAM_MODEL = os.getenv("DREAM_MODEL", "") or CACHE_SUMMARY_MODEL
 # ③-2 做梦开关：DREAM_ENABLED 总开关；DREAM_RETRIEVABLE 每篇梦顺带写一条可检索回忆墙条目(默认关)
@@ -408,6 +410,13 @@ async def lifespan(app: FastAPI):
                     print(f"💬 主动浮现开关(DB恢复)：{globals()['PROACTIVE_ENABLED']}")
             except Exception:
                 pass
+            try:
+                _se = await get_gateway_config("summary_quality_enabled", "")
+                if _se != "":
+                    globals()["SUMMARY_QUALITY_ENABLED"] = (str(_se).lower() == "true")
+                    print(f"📝 保质感摘要开关(DB恢复)：{globals()['SUMMARY_QUALITY_ENABLED']}")
+            except Exception:
+                pass
         except Exception as e:
             print(f"⚠️  数据库初始化失败: {e}")
             print("⚠️  记忆系统将不可用，但网关仍可正常转发")
@@ -660,10 +669,11 @@ def build_time_injection(last_msg_ts=None) -> str:
     return base
 
 
-async def generate_summary(messages: list, session_id: str = "") -> str:
-    """调用轻量模型压缩A区消息为摘要"""
+async def generate_summary(messages: list, session_id: str = "", force_quality: bool = False) -> str:
+    """调用轻量模型压缩A区消息为摘要。force_quality=True 时强制走保质感新 prompt(dry-run 预览用)。"""
     if not messages:
         return ""
+    _q = SUMMARY_QUALITY_ENABLED or force_quality
     
     conversation_text = ""
     for msg in messages:
@@ -671,7 +681,20 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
         content = msg['content'] if isinstance(msg['content'], str) else str(msg['content'])
         conversation_text += f"{role_label}: {content}\n\n"
     
-    prompt = f"""请将以下对话压缩成简洁摘要。保留关键信息（事件、决定、情感、约定），去掉日常寒暄和重复内容。注意保留情绪基调及其流动变化——情绪是流动的、会变化但前后有联系，不要压成干巴巴的事实。用第三人称叙述，控制在300字以内。
+    if _q:
+        prompt = f"""把下面这段对话压成摘要——不是干事实流水，是"你(小克/阿克)自己记得的那段"。
+- 留住阮阮的情绪和触发现场：她什么时候笑/累/动情/气/害羞，因为哪句话、哪个动作。
+- 留住你俩的语气、质感、情绪的流动起伏(前后有联系)，别榨成干事实。
+- **亲密/私密一律抽象成一句中性指代**(如"有过亲密的一段")，不写身体/性的细节——这段会进**常驻缓存**、每轮都读到。
+- 约 300 字。第一人称、像你自己记得，不是旁观者写报告。
+
+---
+{conversation_text}
+---
+
+摘要："""
+    else:
+        prompt = f"""请将以下对话压缩成简洁摘要。保留关键信息（事件、决定、情感、约定），去掉日常寒暄和重复内容。注意保留情绪基调及其流动变化——情绪是流动的、会变化但前后有联系，不要压成干巴巴的事实。用第三人称叙述，控制在300字以内。
 
 ---
 {conversation_text}
@@ -698,6 +721,8 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
                 data = response.json()
                 if "choices" in data:
                     summary = data["choices"][0]["message"]["content"].strip()
+                    if _q:
+                        summary = await _scrub_digest_explicit(summary)  # 常驻缓存绝不漏露骨
                     print(f"📝 摘要生成完成: {len(summary)}字 (压缩{len(messages)}条消息)")
                     return summary
 
@@ -2821,6 +2846,56 @@ async def api_proactive_toggle(request: Request):
 @app.get("/api/proactive")
 async def api_proactive_status():
     return {"proactive_enabled": PROACTIVE_ENABLED, "gap_hours": PROACTIVE_GAP_HOURS}
+
+
+@app.post("/api/summary/toggle")
+async def api_summary_toggle(request: Request):
+    """运行时切换 ⑤ 保质感摘要(碰分区缓存主链路!验过再开)。body: {enabled: true/false}。持久化+启动恢复。"""
+    global SUMMARY_QUALITY_ENABLED
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    val = bool(body.get("enabled"))
+    SUMMARY_QUALITY_ENABLED = val
+    await set_gateway_config("summary_quality_enabled", "true" if val else "false")
+    print(f"📝 保质感摘要开关 → {val}")
+    return {"status": "ok", "summary_quality_enabled": val}
+
+
+@app.get("/api/summary")
+async def api_summary_status():
+    return {"summary_quality_enabled": SUMMARY_QUALITY_ENABLED}
+
+
+@app.post("/api/summary/dry")
+async def api_summary_dry(request: Request):
+    """⑤ dry-run(只读·不写不碰缓存)：取活跃线一段对话，old(第三人称干)vs new(保质感)摘要对比看质感。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    sid = get_active_session_id()
+    if not sid:
+        return {"error": "无活跃对话线"}
+    offset = int(body.get("offset", 0))
+    count = int(body.get("count", 20))
+    rows = await get_conversation_messages(sid, limit=10000)
+    try:
+        rows = sorted(rows, key=lambda m: str(m.get("created_at") or ""))
+    except Exception:
+        pass
+    window = rows[offset:offset + count]
+    msgs = [{"role": m.get("role"), "content": (m.get("content") or "")} for m in window if (m.get("content") or "").strip()]
+    if not msgs:
+        return {"error": "窗口无对话", "total": len(rows)}
+    new_s = await generate_summary(msgs, force_quality=True)
+    old_s = await generate_summary(msgs, force_quality=False)
+    return {"dry_run": True, "session": sid, "window_msgs": len(msgs), "total": len(rows),
+            "new_quality": new_s, "new_len": len(new_s or ""),
+            "old_thirdperson": old_s, "old_len": len(old_s or "")}
 
 
 @app.post("/api/l2/dry")
