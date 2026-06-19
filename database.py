@@ -901,6 +901,37 @@ async def reactivate_decayed_memories(memory_ids: list) -> int:
             return len(memory_ids)
 
 
+async def count_explicit_memories() -> int:
+    """is_explicit=TRUE 的活跃非回忆墙记忆数(记忆控制台「分寸」面板显示)。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return int(await conn.fetchval(
+            "SELECT COUNT(*) FROM memories WHERE is_active = TRUE AND mw_meta IS NULL "
+            "AND is_explicit = TRUE AND content IS NOT NULL AND btrim(content) <> ''") or 0)
+
+
+async def clear_persona_suggestions() -> int:
+    """软清:把所有 pending 人设建议置 ignored(不删数据,可在 status=ignored 查回)。返回清理条数。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute("UPDATE persona_suggestions SET status = 'ignored' WHERE status = 'pending'")
+        try:
+            return int(res.split()[-1])
+        except Exception:
+            return 0
+
+
+async def clear_l5_candidates() -> int:
+    """软清:把所有 pending L5 根基候选置 ignored(不删数据)。返回清理条数。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute("UPDATE l5_candidates SET status = 'ignored' WHERE status = 'pending'")
+        try:
+            return int(res.split()[-1])
+        except Exception:
+            return 0
+
+
 # ---- ③-2 做梦 ----
 
 def _to_date(s):

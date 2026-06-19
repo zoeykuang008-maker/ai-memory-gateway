@@ -30,6 +30,7 @@ from database import save_migrated_memory, find_memory_by_mw_id, save_photo, lin
 from database import list_memorywall, get_memorywall_one, update_memorywall, get_memory_photos, set_memory_active
 from database import get_memories_explicit_flags, set_memory_explicit, get_explicit_backfill_candidates, get_high_arousal_memories
 from database import get_decay_candidates, count_active_memories, deactivate_memories, archive_decayed_memories, reactivate_decayed_memories
+from database import count_explicit_memories, clear_persona_suggestions, clear_l5_candidates
 from database import save_dream, get_dream, list_dreams, get_dream_dates, get_memorywall_dates
 from database import save_feel, get_recent_feels
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate
@@ -137,6 +138,19 @@ DECAY_IMP_MAX = int(os.getenv("DECAY_IMP_MAX", "4"))              # 占位:impor
 DECAY_IDLE_DAYS = int(os.getenv("DECAY_IDLE_DAYS", "5"))          # 占位:多少天没被检索过算"久未取"
 DECAY_AROUSAL_MAX = float(os.getenv("DECAY_AROUSAL_MAX", "0.45")) # 占位:arousal<此值算"低唤起"(情绪浓的受保护)
 _decay_run = {"running": False, "dry_run": True, "archived": 0, "candidates": 0, "error": None, "finished_at": None}
+
+# 记忆控制台：数值 knob 的安全范围(PUT /api/settings 写入时夹紧;/api/console 回报给滑杆做 min/max)。
+# 决定③：漂移等敏感参数可调但限安全范围,防阮阮误设跑飞。
+_CLAMP = {
+    "MAX_MEMORIES_INJECT": (1, 30),
+    "MEMORY_EXTRACT_INTERVAL": (0, 20),
+    "PROACTIVE_GAP_HOURS": (0.5, 72.0),
+    "PERSONA_SUGGESTION_MIN_IMPORTANCE": (1, 10),
+    "MOOD_DRIFT_STEP": (0.0, 0.3),
+    "MOOD_DRIFT_DAILY_CAP": (0, 10),
+    "MOOD_RECENT_N": (5, 100),
+    "L2_REFRESH_N": (1, 50),
+}
 _dream_last_date = None  # 上次跑过做梦的本地日(懒触发去重；启动从 gateway_config 恢复)
 _dream_running = False   # 防并发重入
 
@@ -335,6 +349,16 @@ async def lifespan(app: FastAPI):
                         "CACHE_PARTITION_WINDOW": int, "CACHE_SUMMARY_MODEL": str,
                         "FORCE_STREAM": lambda v: _parse_bool(v),
                         "REASONING_EFFORT": str,
+                        # 记忆控制台 B 类(原 env-only,现复用面板配置存库+恢复)
+                        "MOOD_DRIFT_ENABLED": lambda v: _parse_bool(v),
+                        "MOOD_DRIFT_STEP": float, "MOOD_DRIFT_DAILY_CAP": int, "MOOD_RECENT_N": int,
+                        "MOOD_DRIFT_SKIP_MEMORYWALL": lambda v: _parse_bool(v),
+                        "PERSONA_SUGGESTION_ENABLED": lambda v: _parse_bool(v),
+                        "PERSONA_SUGGESTION_MIN_IMPORTANCE": int,
+                        "MEMORY_EXTRACT_ENABLED": lambda v: _parse_bool(v),
+                        "L2_TODAY_ENABLED": lambda v: _parse_bool(v), "L2_REFRESH_N": int,
+                        "DREAM_ENABLED": lambda v: _parse_bool(v), "DREAM_RETRIEVABLE": lambda v: _parse_bool(v),
+                        "PROACTIVE_GAP_HOURS": float,
                     }
                     _RESTORE_DB = {
                         "EMBEDDING_API_KEY": str, "EMBEDDING_BASE_URL": str,
@@ -350,7 +374,10 @@ async def lifespan(app: FastAPI):
                         if not val:
                             continue
                         if key in _RESTORE_MAIN:
-                            globals()[key] = _RESTORE_MAIN[key](val)
+                            _tv = _RESTORE_MAIN[key](val)
+                            if key in _CLAMP:
+                                _lo, _hi = _CLAMP[key]; _tv = max(_lo, min(_hi, _tv))
+                            globals()[key] = _tv
                             restored.append(key)
                         elif key in _RESTORE_DB:
                             setattr(_db_module, key, _RESTORE_DB[key](val))
@@ -3896,6 +3923,15 @@ async def api_list_l5_candidates(status: str = "pending"):
     return {"status": "ok", "items": items, "total": len(items), "l5_foundation": await get_l5_foundation()}
 
 
+@app.post("/api/l5-candidates/clear")
+async def api_clear_l5_candidates():
+    """记忆控制台:软清所有 pending L5 根基候选(→ignored,不删数据)。决定②。须声明在 /{cand_id} 之前。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    n = await clear_l5_candidates()
+    return {"status": "ok", "cleared": n}
+
+
 @app.post("/api/l5-candidates/{cand_id}")
 async def api_update_l5_candidate(cand_id: int, request: Request):
     """确认（可带编辑后的 content，追加进 l5Foundation 正文）/ 忽略。机器从不直接改 l5Foundation。"""
@@ -3955,6 +3991,16 @@ async def api_list_persona_suggestions(status: str = "pending"):
             d["created_at"] = str(d["created_at"])
         out.append(d)
     return {"items": out, "total": len(out)}
+
+
+@app.post("/api/persona-suggestions/clear")
+async def api_clear_persona_suggestions():
+    """记忆控制台:软清所有 pending 人设建议(→ignored,不删数据,可在 status=ignored 查回)。决定②。
+    须声明在 /{sug_id} 之前。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    n = await clear_persona_suggestions()
+    return {"status": "ok", "cleared": n}
 
 
 @app.post("/api/persona-suggestions")
@@ -4950,6 +4996,20 @@ async def save_settings(request: Request):
             "CACHE_SUMMARY_MODEL":   str,
             "FORCE_STREAM":          lambda v: _parse_bool(v),
             "REASONING_EFFORT":      str,
+            # 记忆控制台 B 类(原 env-only → 存库+热更+恢复)
+            "MOOD_DRIFT_ENABLED":    lambda v: _parse_bool(v),
+            "MOOD_DRIFT_STEP":       float,
+            "MOOD_DRIFT_DAILY_CAP":  int,
+            "MOOD_RECENT_N":         int,
+            "MOOD_DRIFT_SKIP_MEMORYWALL": lambda v: _parse_bool(v),
+            "PERSONA_SUGGESTION_ENABLED": lambda v: _parse_bool(v),
+            "PERSONA_SUGGESTION_MIN_IMPORTANCE": int,
+            "MEMORY_EXTRACT_ENABLED": lambda v: _parse_bool(v),
+            "L2_TODAY_ENABLED":      lambda v: _parse_bool(v),
+            "L2_REFRESH_N":          int,
+            "DREAM_ENABLED":         lambda v: _parse_bool(v),
+            "DREAM_RETRIEVABLE":     lambda v: _parse_bool(v),
+            "PROACTIVE_GAP_HOURS":   float,
         }
 
         # database.py 全局变量映射（开源版用 EMBEDDING_API_KEY + EMBEDDING_BASE_URL）
@@ -5022,8 +5082,11 @@ async def save_settings(request: Request):
 
             if key in _MAIN_VARS:
                 typed_value = _MAIN_VARS[key](value)
+                if key in _CLAMP:
+                    _lo, _hi = _CLAMP[key]; typed_value = max(_lo, min(_hi, typed_value))
+                    await set_gateway_config(key, str(typed_value))  # 存夹紧后的值,重启恢复一致
                 globals()[key] = typed_value
-                os.environ[key] = str(value)
+                os.environ[key] = str(typed_value)
                 if key == "MEMORY_API_KEY":
                     import memory_extractor as _me_mod
                     _me_mod.MEMORY_API_KEY = str(value)
@@ -5055,6 +5118,62 @@ async def save_settings(request: Request):
     except Exception as e:
         print(f"[save_settings] 错误: {e}")
         return {"error": str(e)}
+
+
+@app.get("/api/console")
+async def api_console():
+    """记忆控制台:一次拉全所有 knob 的当前值 + 默认 + 安全范围 + 计数 + 解锁钥匙。只读,页面渲染不靠猜。
+    写回路径:行为开关走各自 /toggle;衰减走 /api/memories/decay/toggle;其余数值/B类开关走 PUT /api/settings(已夹紧)。"""
+    def _rng(k):
+        r = _CLAMP.get(k)
+        return ({"min": r[0], "max": r[1]} if r else {})
+    toggles = {
+        # 5 个行为开关:专用 /toggle 端点;默认关
+        "feel":              {"on": FEEL_ENABLED,            "default": False, "ep": "/api/feel/toggle"},
+        "redact":            {"on": _EXPLICIT_REDACT,        "default": False, "ep": "/api/explicit-redact/toggle"},
+        "summary_quality":   {"on": SUMMARY_QUALITY_ENABLED, "default": False, "ep": "/api/summary/toggle"},
+        "proactive":         {"on": PROACTIVE_ENABLED,       "default": False, "ep": "/api/proactive/toggle"},
+        "decay":             {"on": DECAY_ENABLED,           "default": False, "ep": "/api/memories/decay/toggle"},
+        # B 类:走 PUT /api/settings;多数默认开(当前 live 行为)
+        "mood_drift":        {"on": MOOD_DRIFT_ENABLED,      "default": True,  "key": "MOOD_DRIFT_ENABLED", "sensitive": True},
+        "drift_skip_mw":     {"on": MOOD_DRIFT_SKIP_MEMORYWALL, "default": True, "key": "MOOD_DRIFT_SKIP_MEMORYWALL"},
+        "persona":           {"on": PERSONA_SUGGESTION_ENABLED, "default": True, "key": "PERSONA_SUGGESTION_ENABLED"},
+        "extract":           {"on": MEMORY_EXTRACT_ENABLED,  "default": True,  "key": "MEMORY_EXTRACT_ENABLED", "sensitive": True},
+        "l2_today":          {"on": L2_TODAY_ENABLED,        "default": True,  "key": "L2_TODAY_ENABLED"},
+        "dream":             {"on": DREAM_ENABLED,           "default": True,  "key": "DREAM_ENABLED"},
+        "dream_retrievable": {"on": DREAM_RETRIEVABLE,       "default": False, "key": "DREAM_RETRIEVABLE"},
+    }
+    numbers = {
+        "MAX_MEMORIES_INJECT":     {"value": MAX_MEMORIES_INJECT, "default": 15, "via": "settings", **_rng("MAX_MEMORIES_INJECT")},
+        "MEMORY_EXTRACT_INTERVAL": {"value": MEMORY_EXTRACT_INTERVAL, "default": 1, "via": "settings", **_rng("MEMORY_EXTRACT_INTERVAL")},
+        "MIN_SCORE_THRESHOLD":     {"value": float(_db_module.MIN_SCORE_THRESHOLD), "default": 0.15, "via": "settings", "min": 0, "max": 1},
+        "MEMORY_SEMANTIC_THRESHOLD": {"value": float(_db_module.MEMORY_SEMANTIC_THRESHOLD), "default": 0.5, "via": "settings", "min": 0, "max": 1},
+        "PROACTIVE_GAP_HOURS":     {"value": PROACTIVE_GAP_HOURS, "default": 6, "via": "settings", **_rng("PROACTIVE_GAP_HOURS")},
+        "PERSONA_SUGGESTION_MIN_IMPORTANCE": {"value": PERSONA_SUGGESTION_MIN_IMPORTANCE, "default": 7, "via": "settings", **_rng("PERSONA_SUGGESTION_MIN_IMPORTANCE")},
+        "MOOD_DRIFT_STEP":         {"value": MOOD_DRIFT_STEP, "default": 0.1, "via": "settings", "sensitive": True, **_rng("MOOD_DRIFT_STEP")},
+        "MOOD_DRIFT_DAILY_CAP":    {"value": MOOD_DRIFT_DAILY_CAP, "default": 3, "via": "settings", "sensitive": True, **_rng("MOOD_DRIFT_DAILY_CAP")},
+        "MOOD_RECENT_N":           {"value": MOOD_RECENT_N, "default": 30, "via": "settings", "sensitive": True, **_rng("MOOD_RECENT_N")},
+        "L2_REFRESH_N":            {"value": L2_REFRESH_N, "default": 5, "via": "settings", **_rng("L2_REFRESH_N")},
+        # 衰减阈值:走 /api/memories/decay/toggle
+        "decay_age_days":          {"value": DECAY_AGE_DAYS, "default": 7, "via": "decay", "min": 1, "max": 90},
+        "decay_imp_max":           {"value": DECAY_IMP_MAX, "default": 4, "via": "decay", "min": 1, "max": 10},
+        "decay_idle_days":         {"value": DECAY_IDLE_DAYS, "default": 5, "via": "decay", "min": 1, "max": 90},
+        "decay_arousal_max":       {"value": DECAY_AROUSAL_MAX, "default": 0.45, "via": "decay", "min": 0, "max": 1},
+    }
+    counts = {}
+    if MEMORY_ENABLED:
+        try:
+            counts["is_explicit"] = await count_explicit_memories()
+            counts["active_memories"] = await count_active_memories()
+            counts["persona_pending"] = len(await list_persona_suggestions("pending"))
+            counts["l5_pending"] = len(await list_l5_candidates("pending"))
+            _b = await get_gateway_config("decay_last_batch", "")
+            counts["decay_last_batch"] = len(json.loads(_b)) if _b else 0
+        except Exception as e:
+            counts["error"] = str(e)
+    return {"status": "ok", "memory_enabled": MEMORY_ENABLED,
+            "toggles": toggles, "numbers": numbers, "counts": counts,
+            "intimacy_keys": INTIMACY_UNLOCK_KEYS}
 
 
 # ============================================================
