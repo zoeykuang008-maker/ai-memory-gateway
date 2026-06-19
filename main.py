@@ -88,6 +88,12 @@ EXPLICIT_PENALTY_LAMBDA = float(os.getenv("EXPLICIT_PENALTY_LAMBDA", "0.5"))  # 
 EXPLICIT_CLASSIFIER_ENABLED = os.getenv("EXPLICIT_CLASSIFIER_ENABLED", "true").lower() == "true"  # ① 模糊时是否用 haiku 微判当前消息
 EXPLICIT_CLASSIFIER_MODEL = os.getenv("EXPLICIT_CLASSIFIER_MODEL", "") or os.getenv("MEMORY_MODEL", "anthropic/claude-haiku-4.5")
 
+# 亲密解锁（让收敛闸认得出亲密意图：中性收、亲密放；粘性 K 轮）。硬钥匙=露骨词 + 这些短语；暧昧暗号(您/炒菜/想吃饭)走门控 haiku
+INTIMACY_STICKY_K = int(os.getenv("INTIMACY_STICKY_K", "2"))   # 解锁后再粘 K 轮中性才收回
+INTIMACY_UNLOCK_KEYS = [k.strip().lower() for k in os.getenv(
+    "INTIMACY_UNLOCK_KEYS", "secret time").split(",") if k.strip()]
+_intimacy = {}  # sid -> {"unlocked": bool, "neutral_streak": int}（每轮 update_intimacy 更新；default-safe）
+
 # is_explicit 收敛（阮阮要的方案）：命中露骨/私密记忆时不注入原文场景，收敛成一句定向指令——
 # 让小克「懂暗号→回应当下→别复述/罗列过去私密细节」。运行时开关（gateway_config 持久化），默认关，启动时恢复。
 _EXPLICIT_REDACT = os.getenv("EXPLICIT_REDACT_ENABLED", "false").lower() == "true"
@@ -505,7 +511,7 @@ async def build_system_prompt_with_memories(user_message: str, drift: bool = Tru
 
         # is_explicit 收敛（与分区路一致）：剔除露骨原文，收尾注入定向指令
         _explicit_hits = []
-        if await get_explicit_redact_enabled():
+        if await get_explicit_redact_enabled() and not intimacy_unlocked(get_active_session_id()):
             _flags = await get_memories_explicit_flags([m["id"] for m in memories])
             _explicit_hits = [m for m in memories if _flags.get(m["id"]) and not m.get("mw_meta")]
             if _explicit_hits:
@@ -722,12 +728,12 @@ async def generate_today_digest(session_id: str) -> str:
             convo += f"{role}: {c}\n"
     if not convo.strip():
         return ""
-    prompt = f"""把【今天】你和阮阮的对话浓缩成约 800-1000 字的"今天到哪了"，让你随时攥着今天的脉络。
-最重要：
-- 保留阮阮的情绪和触发现场——她什么时候笑了/哭了/累了/气了/动情了，以及**因为什么**（哪句话、哪个动作、什么场景），别压成第三人称干事实流水。
-- 保留你俩的语气和质感，按时间脉络写今天的情绪起伏。
-- 结尾点出她**此刻的状态**（累不累/开心不开心/在忙什么/身体怎样）。
-- 像你自己记得，不是旁观者写报告。
+    prompt = f"""把【今天】你和阮阮的对话收成约 400-600 字的"今天到哪了"——清爽、有温度的脉络，不是一幕幕复述。
+- **去故事化**：写"今天大致经过了什么、情绪怎么起伏"，别一个场景一个场景地演、别堆细节流水。
+- **留情绪真相**：她什么时候笑了/累了/动情了、大致因为什么——这份情绪底色要在，但点到为止，别铺成戏。
+- **亲密部分一律抽象**：今天若有亲密/私密的事，只用一句中性指代带过(如"你们之间有过亲密的时刻")，**绝不写身体/性的细节或原话**——这是常驻、每轮都读到的，露骨细节由别处按当下语境承担。
+- **结尾点出她此刻的状态**：累不累/开心不开心/在忙什么/身体怎样。
+- 第一人称、像你自己记得，不是旁观者写报告。
 
 今天的对话：
 ---
@@ -802,7 +808,8 @@ def _compose_feel_block(feels: list) -> str:
     (中性语境只留温柔/日常的常驻)。空则不注入。不进检索打分、不碰主链路。"""
     if not feels:
         return ""
-    items = [f for f in feels if not f.get("is_explicit")] if _EXPLICIT_REDACT else list(feels)
+    _redact_feel = _EXPLICIT_REDACT and not intimacy_unlocked(get_active_session_id())
+    items = [f for f in feels if not f.get("is_explicit")] if _redact_feel else list(feels)
     items = items[-3:]
     lines = ["- " + (f.get("content") or "").strip() for f in items if (f.get("content") or "").strip()]
     if not lines:
@@ -1392,6 +1399,40 @@ async def classify_moment_intimacy(user_message: str):
     return v, ("haiku=1" if v else "haiku=0")
 
 
+def _intimacy_lexicon_hit(msg: str) -> bool:
+    m = (msg or "").lower()
+    if any(k in m for k in INTIMACY_UNLOCK_KEYS):          # 硬钥匙短语(secret time 等)
+        return True
+    return any(w in (msg or "") for w in EXPLICIT_LEXICON)  # 露骨词
+
+
+async def update_intimacy(session_id: str, user_message: str) -> bool:
+    """亲密解锁：每轮算一次"当下是否亲密"并更新粘性。硬钥匙/露骨词→立刻亲密；暧昧暗号→门控 haiku 判句意。
+    粘性：解锁后再粘 K 轮中性才收回。default-safe：不确定/出错/分类器关→按中性。返回当前是否解锁。"""
+    st = _intimacy.get(session_id) or {"unlocked": False, "neutral_streak": 0}
+    try:
+        if _intimacy_lexicon_hit(user_message):
+            intimate = True
+        elif EXPLICIT_CLASSIFIER_ENABLED:
+            intimate = await _llm_intimacy_verdict(user_message)
+        else:
+            intimate = False
+    except Exception:
+        intimate = False
+    if intimate:
+        st = {"unlocked": True, "neutral_streak": 0}
+    else:
+        streak = st.get("neutral_streak", 0) + 1
+        st = {"unlocked": bool(st.get("unlocked")) and streak <= INTIMACY_STICKY_K, "neutral_streak": streak}
+    _intimacy[session_id] = st
+    return st["unlocked"]
+
+
+def intimacy_unlocked(session_id: str) -> bool:
+    """读当前轮解锁态(update_intimacy 已在 chat 路算过)。default-safe：默认 False=收。"""
+    return bool((_intimacy.get(session_id) or {}).get("unlocked", False))
+
+
 async def apply_explicit_gate(memories: list, user_message: str, force_intimate=None, force_run=False):
     """②/① 露骨语境闸：候选含高 arousal 记忆才判别当下亲密度，
     再 ② arousal 失配惩罚重排 + ① 非亲密语境硬挡极高 arousal。返回 (memories, debug)。
@@ -1440,7 +1481,7 @@ async def build_memory_text(user_message: str, drift: bool = True) -> str:
 
         # is_explicit 收敛：命中露骨/私密记忆→从注入集剔除原文，收尾只给一句定向指令（默认关，运行时开关）
         _explicit_hits = []
-        if await get_explicit_redact_enabled():
+        if await get_explicit_redact_enabled() and not intimacy_unlocked(get_active_session_id()):
             _flags = await get_memories_explicit_flags([m["id"] for m in memories])
             _explicit_hits = [m for m in memories if _flags.get(m["id"]) and not m.get("mw_meta")]
             if _explicit_hits:
@@ -1840,7 +1881,15 @@ async def chat_completions(request: Request):
         active_sid = get_active_session_id()
         if active_sid:
             session_id = active_sid
-        
+
+        # 亲密解锁：每轮算一次当下亲密度 + 更新粘性(K轮)，供下面三处 redact 读 intimacy_unlocked()。
+        # 仅收敛开时才需要；硬钥匙/露骨词即时、暧昧走门控 haiku；default-safe。
+        if _EXPLICIT_REDACT and user_message:
+            try:
+                await update_intimacy(session_id, user_message)
+            except Exception as _ie:
+                print(f"⚠️ 亲密判别失败(按中性): {_ie}")
+
         # 从DB读取历史
         try:
             db_history = await get_conversation_messages(session_id, limit=10000)
@@ -2592,6 +2641,48 @@ async def api_feel_toggle(request: Request):
 @app.get("/api/feel")
 async def api_feel_status():
     return {"feel_enabled": FEEL_ENABLED}
+
+
+@app.post("/api/l2/dry")
+async def api_l2_dry(request: Request):
+    """L2 dry-run（只读·不写）：用新 prompt 对活跃线今天跑一遍 generate_today_digest，看新样子。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    sid = get_active_session_id()
+    if not sid:
+        return {"error": "无活跃对话线"}
+    d = await generate_today_digest(sid)
+    return {"dry_run": True, "session": sid, "model": CACHE_SUMMARY_MODEL, "len": len(d or ""), "digest": d}
+
+
+@app.post("/api/debug/unlock-sim")
+async def api_unlock_sim(request: Request):
+    """亲密解锁 模拟（只读·不动真状态）：给一串消息，逐条看 intimate判定/how/解锁态/该轮露骨是否被收，验粘性 K。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    msgs = body.get("messages") or []
+    st = {"unlocked": False, "neutral_streak": 0}
+    out = []
+    for m in msgs:
+        if _intimacy_lexicon_hit(m):
+            intimate, how = True, "硬钥匙/露骨词"
+        elif EXPLICIT_CLASSIFIER_ENABLED:
+            v = await _llm_intimacy_verdict(m)
+            intimate, how = v, ("haiku=亲密" if v else "haiku=中性")
+        else:
+            intimate, how = False, "分类器关"
+        if intimate:
+            st = {"unlocked": True, "neutral_streak": 0}
+        else:
+            streak = st["neutral_streak"] + 1
+            st = {"unlocked": st["unlocked"] and streak <= INTIMACY_STICKY_K, "neutral_streak": streak}
+        out.append({"msg": str(m)[:42], "intimate": intimate, "how": how,
+                    "unlocked": st["unlocked"], "neutral_streak": st["neutral_streak"],
+                    "露骨被收": (_EXPLICIT_REDACT and not st["unlocked"])})
+    return {"sticky_K": INTIMACY_STICKY_K, "redact_on": _EXPLICIT_REDACT,
+            "unlock_keys": INTIMACY_UNLOCK_KEYS, "steps": out}
 
 
 @app.get("/api/dreams")
