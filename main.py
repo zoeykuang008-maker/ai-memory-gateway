@@ -29,7 +29,7 @@ from database import init_tables, close_pool, save_message, search_memories, sav
 from database import save_migrated_memory, find_memory_by_mw_id, save_photo, link_photo_to_memory, get_photo, memory_photo_count, delete_memory_photos, get_mw_meta, update_mw_meta
 from database import list_memorywall, get_memorywall_one, update_memorywall, get_memory_photos, set_memory_active
 from database import get_memories_explicit_flags, set_memory_explicit, get_explicit_backfill_candidates, get_high_arousal_memories
-from database import get_decay_candidates, count_active_memories, deactivate_memories
+from database import get_decay_candidates, count_active_memories, deactivate_memories, archive_decayed_memories, reactivate_decayed_memories
 from database import save_dream, get_dream, list_dreams, get_dream_dates, get_memorywall_dates
 from database import save_feel, get_recent_feels
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate
@@ -3145,7 +3145,7 @@ def _decay_thresholds(body=None) -> dict:
 async def api_decay_status():
     return {"decay_enabled": DECAY_ENABLED, "age_days": DECAY_AGE_DAYS, "imp_max": DECAY_IMP_MAX,
             "idle_days": DECAY_IDLE_DAYS, "arousal_max": DECAY_AROUSAL_MAX,
-            "note": "归档=mutate,默认关;高imp/高arousal/近期/被回忆过/回忆墙受保护;归档=is_active FALSE,可逆"}
+            "note": "归档=mutate,默认关;高imp/高arousal/近期/被回忆过/回忆墙受保护;归档=is_active FALSE+decayed_at标,可逆(undo-last);已从 cleanup_old_fragments 30天硬删豁免(归档≠删除,记忆不能丢)"}
 
 
 @app.post("/api/memories/decay-dry")
@@ -3222,7 +3222,7 @@ async def api_decay_run(request: Request):
                     "would_archive": len(ids)}
         if not ids:
             return {"dry_run": False, "archived": 0, "note": "无候选"}
-        await deactivate_memories(ids)
+        await archive_decayed_memories(ids)  # 打 decayed_at 标 → cleanup_old_fragments 豁免(归档≠删除)
         await set_gateway_config("decay_last_batch", json.dumps(ids))
         _decay_run["archived"] = len(ids); _decay_run["finished_at"] = datetime.now(timezone.utc).isoformat()
         return {"dry_run": False, "archived": len(ids), "thresholds": th, "ids": ids,
@@ -3241,12 +3241,7 @@ async def api_decay_undo():
         ids = json.loads(raw) if raw else []
         if not ids:
             return {"status": "ok", "reactivated": 0, "note": "无可复活批次"}
-        ok = 0
-        for mid in ids:
-            try:
-                await set_memory_active(int(mid), True); ok += 1
-            except Exception:
-                pass
+        ok = await reactivate_decayed_memories([int(m) for m in ids])  # is_active=TRUE 且清 decayed_at
         await set_gateway_config("decay_last_batch", "")
         return {"status": "ok", "reactivated": ok}
     except Exception as e:

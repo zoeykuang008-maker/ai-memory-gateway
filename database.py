@@ -229,6 +229,16 @@ async def init_tables():
             END $$;
         """)
 
+        # ②衰减归档标记：decayed_at 非空=被衰减归档(is_active=FALSE)。用于让 cleanup_old_fragments 豁免它们(归档≠删除,记忆不能丢)。
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'decayed_at') THEN
+                    ALTER TABLE memories ADD COLUMN decayed_at TIMESTAMPTZ DEFAULT NULL;
+                END IF;
+            END $$;
+        """)
+
         # 情绪①-第二步 心情漂移：每条记忆每日漂移次数（防跑飞的「每条每日封顶」用；这两列仅作计数，不碰正文/importance/日期）
         await conn.execute("""
             DO $$ BEGIN
@@ -862,6 +872,33 @@ async def count_active_memories() -> int:
         return int(await conn.fetchval(
             "SELECT COUNT(*) FROM memories WHERE is_active = TRUE AND mw_meta IS NULL "
             "AND content IS NOT NULL AND btrim(content) <> ''") or 0)
+
+
+async def archive_decayed_memories(memory_ids: list):
+    """②衰减归档(非合并):置 is_active=FALSE 且 decayed_at=NOW()。decayed_at 标记使 cleanup_old_fragments 豁免它——
+       归档≠删除,记忆不能丢。可逆(reactivate_decayed_memories 清标复活)。"""
+    if not memory_ids:
+        return
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE memories SET is_active = FALSE, decayed_at = NOW() WHERE id = ANY($1::int[])",
+            memory_ids)
+
+
+async def reactivate_decayed_memories(memory_ids: list) -> int:
+    """衰减归档复活:置 is_active=TRUE 且 decayed_at=NULL(清标)。返回受影响行数。"""
+    if not memory_ids:
+        return 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            "UPDATE memories SET is_active = TRUE, decayed_at = NULL WHERE id = ANY($1::int[])",
+            memory_ids)
+        try:
+            return int(res.split()[-1])
+        except Exception:
+            return len(memory_ids)
 
 
 # ---- ③-2 做梦 ----
@@ -2471,20 +2508,22 @@ async def cleanup_old_fragments(days: int = 30):
     - layer = 1（原始碎片）
     - is_active = FALSE（已归档）
     - created_at 在 days 天之前
-    
+    - decayed_at IS NULL（②衰减归档的项豁免——归档≠删除,记忆不能丢；这类靠 reactivate 复活,绝不硬删）
+
     Returns:
         删除的记忆数量
     """
     from datetime import datetime, timedelta
-    
+
     pool = await get_pool()
     async with pool.acquire() as conn:
         cutoff_date = datetime.now() - timedelta(days=days)
-        
+
         result = await conn.execute("""
             DELETE FROM memories
             WHERE layer = 1
             AND is_active = FALSE
+            AND decayed_at IS NULL
             AND created_at < $1
         """, cutoff_date)
         
