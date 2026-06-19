@@ -2898,12 +2898,17 @@ async def api_summary_dry(request: Request):
             "old_thirdperson": old_s, "old_len": len(old_s or "")}
 
 
+_scrub_status = {"running": False, "dry_run": True, "parts": 0, "changed": 0, "details": [], "error": None, "finished_at": None}
+
+
 @app.post("/api/summary/scrub-existing")
 async def api_summary_scrub_existing(request: Request):
-    """⑤(a) 把活跃线现有 summary_parts 残留的露骨 scrub 掉(_scrub:去露骨、段落仍连贯)。
-    dry_run=true 只看 before/after 不写；false 写回 session_cache_state(那几段一次性缓存重建)。"""
+    """⑤(a) 把活跃线现有 summary_parts 残留的露骨 scrub 掉(_scrub:去露骨、段落仍连贯)。后台跑+/status 轮询。
+    dry_run=true 只算 before/after 不写；false 写回 session_cache_state(那几段一次性缓存重建)。"""
     if not MEMORY_ENABLED:
         return {"error": "记忆系统未启用"}
+    if _scrub_status["running"]:
+        return {"error": "scrub 运行中", "status": dict(_scrub_status)}
     try:
         body = await request.json()
     except Exception:
@@ -2912,21 +2917,43 @@ async def api_summary_scrub_existing(request: Request):
     if not sid:
         return {"error": "无活跃对话线"}
     dry_run = bool(body.get("dry_run", True))
-    state = await get_session_cache_state(sid)
-    parts = state.get("summary_parts") or []
-    a_start = state.get("a_start_round", 0)
-    out, new_parts, changed = [], [], 0
-    for i, p in enumerate(parts):
-        sc = await _scrub_digest_explicit(p)
-        new_parts.append(sc)
-        ch = (sc != p)
-        if ch:
-            changed += 1
-        out.append({"i": i, "changed": ch, "before_len": len(p), "after_len": len(sc),
-                    "before_head": (p or "")[:110], "after": sc})
-    if not dry_run and changed:
-        await save_session_cache_state(sid, new_parts, a_start)
-    return {"dry_run": dry_run, "session": sid, "parts": len(parts), "changed": changed, "details": out}
+    _scrub_status.update({"running": True, "dry_run": dry_run, "parts": 0, "changed": 0,
+                          "details": [], "error": None, "finished_at": None})
+
+    async def _run():
+        try:
+            state = await get_session_cache_state(sid)
+            parts = state.get("summary_parts") or []
+            a_start = state.get("a_start_round", 0)
+            _scrub_status["parts"] = len(parts)
+            new_parts, out, changed = [], [], 0
+            for i, p in enumerate(parts):
+                sc = await _scrub_digest_explicit(p)
+                new_parts.append(sc)
+                ch = (sc != p)
+                if ch:
+                    changed += 1
+                out.append({"i": i, "changed": ch, "before_len": len(p or ""), "after_len": len(sc or ""),
+                            "before_head": (p or "")[:110], "after": sc})
+            _scrub_status["changed"] = changed
+            _scrub_status["details"] = out
+            if not dry_run and changed:
+                await save_session_cache_state(sid, new_parts, a_start)
+            print(f"📝 摘要 scrub{'(dry)' if dry_run else ''}: {changed}/{len(parts)} 段含露骨")
+        except Exception as e:
+            _scrub_status["error"] = str(e)
+            print(f"❌ 摘要 scrub 异常: {e}")
+        finally:
+            _scrub_status["running"] = False
+            _scrub_status["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+    asyncio.create_task(_run())
+    return {"status": "started", "dry_run": dry_run, "session": sid}
+
+
+@app.get("/api/summary/scrub-existing/status")
+async def api_summary_scrub_status():
+    return dict(_scrub_status)
 
 
 @app.post("/api/l2/dry")
