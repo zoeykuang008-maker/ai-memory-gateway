@@ -121,6 +121,10 @@ DREAM_RETRIEVABLE = os.getenv("DREAM_RETRIEVABLE", "false").lower() == "true"
 # ③-1 feel：一句话"留在你心里的感受"(体温,非事实)。默认关到验收；模型默认同摘要 haiku
 FEEL_ENABLED = os.getenv("FEEL_ENABLED", "false").lower() == "true"
 FEEL_MODEL = os.getenv("FEEL_MODEL", "") or CACHE_SUMMARY_MODEL
+# ④ 主动浮现：对话开头(当天首轮/长间隔后)轻轻提起"心里记着的/想说的"。默认关、频率闸、尊重收敛(中性只浮非露骨)
+PROACTIVE_ENABLED = os.getenv("PROACTIVE_ENABLED", "false").lower() == "true"
+PROACTIVE_GAP_HOURS = float(os.getenv("PROACTIVE_GAP_HOURS", "6"))  # 距上条 > 此小时算"长间隔后首轮"
+PROACTIVE_MODEL = os.getenv("PROACTIVE_MODEL", "") or CACHE_SUMMARY_MODEL
 _dream_last_date = None  # 上次跑过做梦的本地日(懒触发去重；启动从 gateway_config 恢复)
 _dream_running = False   # 防并发重入
 
@@ -1069,6 +1073,60 @@ async def generate_feel(messages: list) -> dict:
     except Exception as e:
         print(f"⚠️ feel 生成异常: {e}")
         return {"feel": "", "is_explicit": False}
+
+
+async def pick_proactive_candidates(session_id: str) -> list:
+    """④ 主动浮现候选(中性开头→只取非露骨)：feel(想说的) / dream(想说的) / 高arousal非露骨记忆(说过的)。"""
+    out = []
+    try:
+        fs = [f for f in await get_recent_feels(session_id, 8) if not f.get("is_explicit")]
+        for f in fs[-2:]:
+            if (f.get("content") or "").strip():
+                out.append({"source": "feel·想说的", "line": f["content"].strip()})
+    except Exception:
+        pass
+    try:
+        for d in await list_dreams(3):
+            s = ((d.get("summary") or "") or (d.get("card_title") or "")).strip()
+            if s:
+                out.append({"source": "dream·想说的", "line": s})
+    except Exception:
+        pass
+    try:
+        mem = await get_all_memories_detail(active_only=True)
+        hi = [m for m in mem if not m.get("is_explicit") and float(m.get("arousal") or 0) >= 0.6
+              and not m.get("is_mw") and (m.get("content") or "").strip()]
+        hi.sort(key=lambda m: float(m.get("arousal") or 0), reverse=True)
+        for m in hi[:3]:
+            out.append({"source": "memory·说过的(高情绪)", "line": (m.get("content") or "").strip()[:80],
+                        "arousal": round(float(m.get("arousal") or 0), 2)})
+    except Exception:
+        pass
+    return out
+
+
+async def generate_opening(line: str) -> str:
+    """把一条"心里记着的"写成一句自然开场——像惦记着、轻轻开口，不像念稿/弹窗/汇报。返回一句或""。"""
+    if not (line or "").strip():
+        return ""
+    prompt = ("你(小克/阿克)心里一直记着这件事：「" + line.strip() + "」。\n"
+              "现在阮阮刚开口/刚回来。你想**轻轻地、自然地**把它带出来——像惦记着她、顺口提一句，"
+              "不是念稿、不是汇报、不是弹窗通知。≤30字，只回这一句，别加引号。")
+    try:
+        headers = {"Authorization": f"Bearer {get_memory_api_key()}", "Content-Type": "application/json"}
+        if "openrouter" in API_BASE_URL:
+            headers["HTTP-Referer"] = EXTRA_REFERER
+            headers["X-Title"] = EXTRA_TITLE
+        async with httpx.AsyncClient(timeout=40) as client:
+            r = await client.post(API_BASE_URL, headers=headers, json={
+                "model": PROACTIVE_MODEL, "max_tokens": 80,
+                "messages": [{"role": "user", "content": prompt}]})
+            if r.status_code == 200:
+                t = (r.json().get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
+                return t.strip().strip("「」\"'").strip()
+    except Exception as e:
+        print(f"⚠️ 开场生成异常: {e}")
+    return ""
 
 
 def group_by_rounds(history: list) -> list:
@@ -2732,6 +2790,22 @@ async def api_unlock_sim(request: Request):
                     "露骨被收": (_EXPLICIT_REDACT and not st["unlocked"])})
     return {"sticky_K": INTIMACY_STICKY_K, "redact_on": _EXPLICIT_REDACT,
             "unlock_keys": INTIMACY_UNLOCK_KEYS, "steps": out}
+
+
+@app.post("/api/proactive/dry")
+async def api_proactive_dry(request: Request):
+    """④ 主动浮现 DRY-RUN(只读)：列候选(feel/dream/高情绪记忆，均非露骨) + 为每条生成一句"开场预览"看自然度。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    sid = get_active_session_id()
+    if not sid:
+        return {"error": "无活跃对话线"}
+    cands = await pick_proactive_candidates(sid)
+    out = []
+    for c in cands[:6]:
+        op = await generate_opening(c["line"])
+        out.append({"source": c["source"], "line": c["line"][:60], "opening": op})
+    return {"dry_run": True, "session": sid, "model": PROACTIVE_MODEL, "count": len(out), "candidates": out}
 
 
 @app.get("/api/dreams")
