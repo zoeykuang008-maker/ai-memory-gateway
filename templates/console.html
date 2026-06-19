@@ -166,6 +166,7 @@ input[type=range]::-moz-range-thumb{width:13px;height:13px;border:none;border-ra
       <div class="row"><div class="label">语义阈值</div><div class="ctl sld"><input type="range" data-num="MEMORY_SEMANTIC_THRESHOLD" data-via="settings"><span class="val" id="val-MEMORY_SEMANTIC_THRESHOLD"></span></div></div>
       <div class="row"><div class="label">提取间隔(轮)</div><div class="ctl sld"><input type="range" data-num="MEMORY_EXTRACT_INTERVAL" data-via="settings"><span class="val" id="val-MEMORY_EXTRACT_INTERVAL"></span></div></div>
       <div class="row"><div><div class="label">提取总开关<span class="badge sens">敏感</span></div><div class="hint" id="h-extract"></div></div><div class="ctl"><label class="tg"><input type="checkbox" id="tg-extract"><span class="track"></span><span class="knob"></span></label></div></div>
+      <div class="row"><div><div class="label">看图(多模态透传)<span class="badge sens">敏感</span></div><div class="hint" id="h-image"></div></div><div class="ctl"><label class="tg"><input type="checkbox" id="tg-image"><span class="track"></span><span class="knob"></span></label></div></div>
     </div>
 
     <!-- SURFACING -->
@@ -274,7 +275,7 @@ function setSlider(key){
 
 function render(){
   paintStatus();
-  ['feel','redact','summary_quality','proactive','decay','mood_drift','drift_skip_mw','persona','extract','l2_today','dream','dream_retrievable']
+  ['feel','redact','summary_quality','proactive','decay','mood_drift','drift_skip_mw','persona','extract','l2_today','dream','dream_retrievable','image']
     .forEach(k=>setToggle(k,k));
   Object.keys(DATA.numbers).forEach(setSlider);
   // counts
@@ -385,7 +386,7 @@ async function runMaint(kind){
 
 // ---- 绑定 ----
 function bind(){
-  const tgmap={mood_drift:'mood_drift',feel:'feel',drift_skip_mw:'drift_skip_mw',redact:'redact',extract:'extract',summary_quality:'summary_quality',proactive:'proactive',decay:'decay',dream:'dream',dream_retrievable:'dream_retrievable',l2_today:'l2_today',persona:'persona'};
+  const tgmap={mood_drift:'mood_drift',feel:'feel',drift_skip_mw:'drift_skip_mw',redact:'redact',extract:'extract',summary_quality:'summary_quality',proactive:'proactive',decay:'decay',dream:'dream',dream_retrievable:'dream_retrievable',l2_today:'l2_today',persona:'persona',image:'image'};
   Object.keys(tgmap).forEach(id=>{ const el=document.getElementById('tg-'+id); if(el) el.addEventListener('change',()=>onToggle(id,tgmap[id])); });
   document.querySelectorAll('input[data-num]').forEach(el=>{
     el.addEventListener('input',()=>{ const v=document.getElementById('val-'+el.dataset.num); if(v) v.textContent=fmt(el.dataset.num,el.value); });

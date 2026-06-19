@@ -113,6 +113,8 @@ PERSONA_SUGGESTION_ENABLED = os.getenv("PERSONA_SUGGESTION_ENABLED", "true").low
 PERSONA_SUGGESTION_MIN_IMPORTANCE = int(os.getenv("PERSONA_SUGGESTION_MIN_IMPORTANCE", "7"))
 # ② L5根基候选自动生成:提取到 is_milestone 里程碑时自动入 L5 待审。默认开(行为不变);控制台可关→阮阮纯手动 curate
 L5_AUTO_ENABLED = os.getenv("L5_AUTO_ENABLED", "true").lower() == "true"
+# 看图(多模态透传):分区拼 prompt 时保留当前 user 的 image_url 块转发给 opus(默认关到验收;控制台开关)。关=原行为(拍扁纯文本)
+IMAGE_ENABLED = os.getenv("IMAGE_ENABLED", "false").lower() == "true"
 
 # 分区缓存
 CACHE_PARTITION_ENABLED = os.getenv("CACHE_PARTITION_ENABLED", "false").lower() == "true"
@@ -358,6 +360,7 @@ async def lifespan(app: FastAPI):
                         "PERSONA_SUGGESTION_ENABLED": lambda v: _parse_bool(v),
                         "PERSONA_SUGGESTION_MIN_IMPORTANCE": int,
                         "L5_AUTO_ENABLED": lambda v: _parse_bool(v),
+                        "IMAGE_ENABLED": lambda v: _parse_bool(v),
                         "MEMORY_EXTRACT_ENABLED": lambda v: _parse_bool(v),
                         "L2_TODAY_ENABLED": lambda v: _parse_bool(v), "L2_REFRESH_N": int,
                         "DREAM_ENABLED": lambda v: _parse_bool(v), "DREAM_RETRIEVABLE": lambda v: _parse_bool(v),
@@ -1310,6 +1313,25 @@ def _apply_breakpoint(msg: dict) -> bool:
     return False
 
 
+def _assemble_current_user(parts: list, current_user_msg: dict) -> dict:
+    """拼「当前 user」消息:注入块(parts:时间/记忆/feel/proactive…)+ 原文。
+    IMAGE_ENABLED 且原 content 是多模态 list 时:注入+原文本合成首个 text 块、保留 image_url 等媒体块(透传给 opus);
+    否则(开关关或本就纯文本)=原行为:全拍成纯文本字符串。只动这条尾部 user,不碰缓存区/主链路别处。"""
+    content = current_user_msg.get('content')
+    if IMAGE_ENABLED and isinstance(content, list):
+        orig_text = " ".join(b.get("text", "") for b in content
+                             if isinstance(b, dict) and b.get("type") == "text")
+        segs = [p for p in parts if p]
+        if orig_text.strip():
+            segs.append(orig_text)
+        media = [b for b in content if isinstance(b, dict) and b.get("type") != "text"]
+        return {"role": "user", "content": [{"type": "text", "text": "\n\n".join(segs)}] + media}
+    if isinstance(content, list):
+        content = " ".join(b.get("text", "") for b in content
+                          if isinstance(b, dict) and b.get("type") == "text")
+    return {"role": "user", "content": "\n\n".join(list(parts) + [content if content is not None else ""])}
+
+
 async def build_partitioned_messages(
     session_id: str,
     all_messages: list,
@@ -1469,15 +1491,7 @@ async def build_partitioned_messages(
             if mem_text:
                 parts.append(mem_text)
 
-        current_text = current_user_msg['content']
-        if isinstance(current_text, list):
-            current_text = " ".join(
-                item.get("text", "") for item in current_text
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
-
-        parts.append(current_text)
-        result.append({"role": "user", "content": "\n\n".join(parts)})
+        result.append(_assemble_current_user(parts, current_user_msg))
     
     bp_count = 1 + (1 if summary_parts else 0) + (1 if cleaned_a else 0) + (1 if b_msgs else 0)
     summary_total = sum(len(p) for p in summary_parts)
@@ -1535,15 +1549,7 @@ async def _build_basic_cached(
             if mem_text:
                 parts.append(mem_text)
 
-        current_text = current_user_msg['content']
-        if isinstance(current_text, list):
-            current_text = " ".join(
-                item.get("text", "") for item in current_text
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
-
-        parts.append(current_text)
-        result.append({"role": "user", "content": "\n\n".join(parts)})
+        result.append(_assemble_current_user(parts, current_user_msg))
     
     bp_count = 1 + (1 if history else 0)
     print(f"🔒 基础缓存(降级): BP×{bp_count} | 历史{len(history)}条 | 总{len(result)}条messages")
@@ -5128,6 +5134,7 @@ async def save_settings(request: Request):
             "PERSONA_SUGGESTION_ENABLED": lambda v: _parse_bool(v),
             "PERSONA_SUGGESTION_MIN_IMPORTANCE": int,
             "L5_AUTO_ENABLED":       lambda v: _parse_bool(v),
+            "IMAGE_ENABLED":         lambda v: _parse_bool(v),
             "MEMORY_EXTRACT_ENABLED": lambda v: _parse_bool(v),
             "L2_TODAY_ENABLED":      lambda v: _parse_bool(v),
             "L2_REFRESH_N":          int,
@@ -5263,6 +5270,7 @@ async def api_console():
         "drift_skip_mw":     {"on": MOOD_DRIFT_SKIP_MEMORYWALL, "default": True, "key": "MOOD_DRIFT_SKIP_MEMORYWALL"},
         "persona":           {"on": PERSONA_SUGGESTION_ENABLED, "default": True, "key": "PERSONA_SUGGESTION_ENABLED"},
         "l5_auto":           {"on": L5_AUTO_ENABLED, "default": True, "key": "L5_AUTO_ENABLED"},
+        "image":             {"on": IMAGE_ENABLED, "default": False, "key": "IMAGE_ENABLED", "sensitive": True},
         "extract":           {"on": MEMORY_EXTRACT_ENABLED,  "default": True,  "key": "MEMORY_EXTRACT_ENABLED", "sensitive": True},
         "l2_today":          {"on": L2_TODAY_ENABLED,        "default": True,  "key": "L2_TODAY_ENABLED"},
         "dream":             {"on": DREAM_ENABLED,           "default": True,  "key": "DREAM_ENABLED"},
