@@ -2529,6 +2529,16 @@ async def dashboard_page(request: Request):
     return templates.TemplateResponse(request, "dashboard.html")
 
 
+@app.get("/console", response_class=HTMLResponse)
+async def console_page():
+    """记忆控制台:阮阮的金色塔罗操作间。自包含整页,FileResponse 直读(避开 Jinja 处理大段 JS)。
+    knob 状态走 /api/console,写回走各 toggle/PUT settings/decay 端点。"""
+    if not MEMORY_ENABLED:
+        return HTMLResponse("<h3>记忆系统未启用（设置 MEMORY_ENABLED=true 开启）</h3>")
+    from fastapi.responses import FileResponse
+    return FileResponse("templates/console.html", media_type="text/html")
+
+
 
 # ============================================================
 # 管理 API
