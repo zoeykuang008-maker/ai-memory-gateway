@@ -699,6 +699,53 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
 # ============================================================
 # ② L2今日浓缩（保质感；非缓存当前轮注入；后台每 N 轮刷一次）
 # ============================================================
+# L2 常驻每轮读到 → 露骨绝不能漏。后处理保底（prompt 不可靠，haiku 会硬塞细节）
+_DIGEST_BAN = ["手指", "玩具", "G点", "潮吹", "喷", "插入", "穴", "敏感点", "自慰", "龟头",
+               "阴蒂", "阴道", "乳", "高潮", "射了", "舔", "湿了", "硬了", "脱光", "裸", "性器", "寸止"]
+
+
+async def _sanitize_digest(text: str) -> str:
+    """窄任务重写：把今日总结里性/身体的具体细节抹成一句中性指代，其余脉络/情绪/当下状态原样。"""
+    if not text.strip():
+        return text
+    prompt = ("下面是一段「今日总结」(每轮都会被读到的常驻内容)。把其中**任何性/身体的具体细节**"
+              "(动作/部位/玩具/潮吹/G点/自慰/参数/原话等)**改写成一句中性指代**"
+              "(例：「下午你们之间有过很亲密、很私密的一段」)，其余脉络、情绪、她的当下状态**原样保留**。"
+              "只输出改写后的全文，别加任何解释。\n\n---\n" + text + "\n---")
+    try:
+        headers = {"Authorization": f"Bearer {get_memory_api_key()}", "Content-Type": "application/json"}
+        if "openrouter" in API_BASE_URL:
+            headers["HTTP-Referer"] = EXTRA_REFERER
+            headers["X-Title"] = EXTRA_TITLE
+        async with httpx.AsyncClient(timeout=90) as client:
+            r = await client.post(API_BASE_URL, headers=headers, json={
+                "model": CACHE_SUMMARY_MODEL, "max_tokens": 1200,
+                "messages": [{"role": "user", "content": prompt}]})
+            if r.status_code == 200:
+                t = (r.json().get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
+                if t:
+                    return t
+    except Exception as e:
+        print(f"⚠️ L2 sanitize 异常: {e}")
+    return text
+
+
+async def _scrub_digest_explicit(d: str) -> str:
+    """保底链：禁词命中 → sanitize(窄任务) → 仍命中 → 确定性硬删含禁词的整句(常驻 L2 绝不漏露骨)。"""
+    if not d or not any(w in d for w in _DIGEST_BAN):
+        return d
+    d2 = await _sanitize_digest(d)
+    if any(w in d2 for w in _DIGEST_BAN):
+        import re
+        sents = re.split(r'(?<=[。！？\n])', d2)
+        kept = [s for s in sents if not any(w in s for w in _DIGEST_BAN)]
+        d2 = "".join(kept).strip()
+        if "亲密" not in d2 and "私密" not in d2:
+            d2 += "\n\n（今天你们之间有过很私密的一段，细节这里不展开。）"
+        print("🔞 L2 兜底硬删含禁词句(sanitize 后仍残留)")
+    return d2 or d
+
+
 async def generate_today_digest(session_id: str) -> str:
     """把【今天】的对话压成约 800-1000字"今天到哪了"，保质感（接铁则一：留阮阮情绪+触发现场，别压成第三人称干事实）。"""
     if not session_id:
@@ -755,6 +802,7 @@ async def generate_today_digest(session_id: str) -> str:
                 data = response.json()
                 if "choices" in data:
                     d = data["choices"][0]["message"]["content"].strip()
+                    d = await _scrub_digest_explicit(d)
                     print(f"📝 L2今日浓缩生成: {len(d)}字")
                     return d
         print(f"⚠️ L2 digest 失败: HTTP {response.status_code}")
