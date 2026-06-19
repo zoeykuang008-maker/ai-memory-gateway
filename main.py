@@ -1105,7 +1105,15 @@ async def pick_proactive_candidates(session_id: str) -> list:
         hi = [m for m in mem if not m.get("is_explicit") and not _looks_explicit(m.get("content"))
               and float(m.get("arousal") or 0) >= 0.6 and not m.get("is_mw") and (m.get("content") or "").strip()]
         hi.sort(key=lambda m: float(m.get("arousal") or 0), reverse=True)
-        for m in hi[:3]:
+        cand_m = hi[:6]
+        # live haiku 兜底：有些露骨记忆 is_explicit 漏标且无露骨词，词法抓不住 → 现判一次，排除露骨
+        if cand_m:
+            try:
+                verdict = await tag_explicit_batch([{"id": m["id"], "content": m["content"]} for m in cand_m])
+                cand_m = [m for m in cand_m if not verdict.get(m["id"])]
+            except Exception:
+                cand_m = []  # 判别失败→default-safe，这源整源不浮(宁缺毋滥)
+        for m in cand_m[:3]:
             out.append({"source": "memory·说过的(高情绪)", "line": (m.get("content") or "").strip()[:80],
                         "arousal": round(float(m.get("arousal") or 0), 2)})
     except Exception:
