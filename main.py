@@ -2055,6 +2055,44 @@ async def list_models():
     }
 
 
+_diag_mm = {"last": None, "last_image": None}
+
+
+@app.get("/api/debug/last-multimodal")
+async def api_debug_last_multimodal():
+    """诊断:最近一次 /v1/chat/completions 收到的消息 content 结构(看 Kelivo 到底发没发 image 块)。只读,不改行为。"""
+    return dict(_diag_mm)
+
+
+def _capture_multimodal(messages):
+    """记录入口收到的 content 结构(只存元数据+图 url 前缀,不存整图)。诊断用,不影响转发。"""
+    try:
+        cap = []
+        for m in messages:
+            c = m.get("content")
+            if isinstance(c, list):
+                types = {}
+                imgs = []
+                for b in c:
+                    if isinstance(b, dict):
+                        t = b.get("type", "?")
+                        types[t] = types.get(t, 0) + 1
+                        if t == "image_url":
+                            u = b.get("image_url")
+                            us = (u.get("url", "") if isinstance(u, dict) else str(u)) or ""
+                            imgs.append(us[:90])
+                cap.append({"role": m.get("role"), "kind": "list", "types": types, "img_samples": imgs})
+            else:
+                cap.append({"role": m.get("role"), "kind": "str", "len": len(c or "")})
+        img_total = sum(b["types"].get("image_url", 0) for b in cap if b.get("kind") == "list")
+        snap = {"at": datetime.now(timezone.utc).isoformat(), "image_blocks": img_total, "messages": cap[-6:]}
+        _diag_mm["last"] = snap
+        if img_total > 0:
+            _diag_mm["last_image"] = snap
+    except Exception:
+        pass
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     """核心转发接口"""
@@ -2063,10 +2101,11 @@ async def chat_completions(request: Request):
             status_code=500,
             content={"error": "API_KEY 未设置，请在环境变量中配置"},
         )
-    
+
     body = await request.json()
     messages = body.get("messages", [])
-    
+    _capture_multimodal(messages)  # 诊断:记录入口 content 结构(只读快照)
+
     # ---------- 检测是否应跳过对话存储 ----------
     # 客户端通过header显式声明（如标题生成等辅助请求）
     skip_conversation_log = request.headers.get("X-Skip-Conversation-Log", "").lower() == "true"
