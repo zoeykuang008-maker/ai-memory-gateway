@@ -2000,22 +2000,35 @@ async def save_session_cache_state(session_id: str, summary_parts: list, a_start
         """, session_id, summary_json, a_start_round)
 
 
+def _parse_utc_dt(s: str):
+    """'2026-06-19 15:56:32' / ISO → UTC 感知 datetime(asyncpg timestamptz 参数要 datetime 对象,不能传 str)。"""
+    from datetime import datetime, timezone
+    s = (s or "").strip().replace("T", " ")
+    s = s.split("+")[0].split(".")[0].strip()  # 去时区后缀/小数秒
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 async def count_conversations_since(session_id: str, since_iso: str) -> int:
     """统计某 session 在 since_iso(UTC)之后的对话消息数(回滚 dry 用)。"""
+    dt = _parse_utc_dt(since_iso)
     pool = await get_pool()
     async with pool.acquire() as conn:
         return int(await conn.fetchval(
-            "SELECT COUNT(*) FROM conversations WHERE session_id = $1 AND created_at > $2::timestamptz",
-            session_id, since_iso) or 0)
+            "SELECT COUNT(*) FROM conversations WHERE session_id = $1 AND created_at > $2",
+            session_id, dt) or 0)
 
 
 async def delete_conversations_since(session_id: str, since_iso: str) -> int:
     """删某 session 在 since_iso(UTC)之后的对话消息,返回删除数(物理回滚到该时间点)。"""
+    dt = _parse_utc_dt(since_iso)
     pool = await get_pool()
     async with pool.acquire() as conn:
         res = await conn.execute(
-            "DELETE FROM conversations WHERE session_id = $1 AND created_at > $2::timestamptz",
-            session_id, since_iso)
+            "DELETE FROM conversations WHERE session_id = $1 AND created_at > $2",
+            session_id, dt)
         try:
             return int(res.split()[-1])
         except Exception:
