@@ -2000,6 +2000,28 @@ async def save_session_cache_state(session_id: str, summary_parts: list, a_start
         """, session_id, summary_json, a_start_round)
 
 
+async def count_conversations_since(session_id: str, since_iso: str) -> int:
+    """统计某 session 在 since_iso(UTC)之后的对话消息数(回滚 dry 用)。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return int(await conn.fetchval(
+            "SELECT COUNT(*) FROM conversations WHERE session_id = $1 AND created_at > $2::timestamptz",
+            session_id, since_iso) or 0)
+
+
+async def delete_conversations_since(session_id: str, since_iso: str) -> int:
+    """删某 session 在 since_iso(UTC)之后的对话消息,返回删除数(物理回滚到该时间点)。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            "DELETE FROM conversations WHERE session_id = $1 AND created_at > $2::timestamptz",
+            session_id, since_iso)
+        try:
+            return int(res.split()[-1])
+        except Exception:
+            return 0
+
+
 # ============================================================
 # Token 使用记录
 # ============================================================

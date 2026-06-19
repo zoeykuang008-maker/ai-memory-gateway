@@ -33,6 +33,7 @@ from database import get_decay_candidates, count_active_memories, deactivate_mem
 from database import count_explicit_memories, clear_persona_suggestions, clear_l5_candidates, get_current_mood
 from database import save_dream, get_dream, list_dreams, get_dream_dates, get_memorywall_dates
 from database import save_feel, get_recent_feels, get_all_feels, set_feel_explicit, save_image_memory
+from database import count_conversations_since, delete_conversations_since
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories, tag_emotions_batch, tag_explicit_batch
@@ -5495,6 +5496,53 @@ async def api_feels(limit: int = 40):
         rows = list(reversed(await get_recent_feels(get_active_session_id(), limit)))
         return {"feels": [{"content": r.get("content", ""), "is_explicit": bool(r.get("is_explicit"))}
                           for r in rows], "count": len(rows)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/admin/rollback-session")
+async def api_rollback_session(request: Request):
+    """把某 session 物理回滚到某时间点:删该 UTC 时间之后的对话 + 摘要裁到 keep_parts 段并设 a_start_round + 清 L2今日。
+    dry_run=true(默认)只报会删多少/当前段数,不动数据。⚠️ 改生产、不可逆,先 dry 看清再 false。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    session = (body.get("session") or "").strip()
+    since = (body.get("before_iso") or "").strip()  # 删此 UTC 时间之后的对话
+    keep_parts = body.get("keep_parts")
+    a_start = body.get("a_start_round")
+    clear_l2 = bool(body.get("clear_l2", True))
+    dry = bool(body.get("dry_run", True))
+    if not session or not since:
+        return {"error": "需要 session + before_iso(UTC)"}
+    try:
+        to_delete = await count_conversations_since(session, since)
+        st = await get_session_cache_state(session)
+        cur_parts = len(st.get("summary_parts") or [])
+        out = {"session": session, "before_iso": since, "convos_after_cutoff": to_delete,
+               "summary_parts_now": cur_parts, "summary_parts_target": keep_parts,
+               "a_start_round_now": st.get("a_start_round"), "a_start_round_target": a_start,
+               "clear_l2": clear_l2, "dry_run": dry}
+        if dry:
+            return out
+        out["convos_deleted"] = await delete_conversations_since(session, since)
+        if keep_parts is not None and a_start is not None:
+            parts = (st.get("summary_parts") or [])[:int(keep_parts)]
+            await save_session_cache_state(session, parts, int(a_start))
+            out["summary_trimmed_to"] = len(parts)
+        if clear_l2:
+            for _k in ("l2_today", "l2_today_date", "l2_bridge"):
+                await set_gateway_config(_k, "")
+            try:
+                _l2_state["today"] = ""; _l2_state["date"] = None; _l2_state["bridge"] = ""
+            except Exception:
+                pass
+            out["l2_cleared"] = True
+        print(f"🧹 rollback-session {session} → 删对话{out.get('convos_deleted')} 摘要裁{out.get('summary_trimmed_to')}段 L2清={clear_l2}")
+        return out
     except Exception as e:
         return {"error": str(e)}
 
