@@ -874,6 +874,20 @@ async def count_active_memories() -> int:
             "AND content IS NOT NULL AND btrim(content) <> ''") or 0)
 
 
+async def get_current_mood(recent_n: int = 30, skip_memorywall: bool = True) -> dict:
+    """小克「当下情绪」:最近 recent_n 条活跃记忆 valence/arousal 均值(=心情漂移 current_mood 的最近窗口基线,
+    与 apply_mood_drift 同源 → 主页心跳/电波=小克所见)。只读。"""
+    mw = "AND mw_meta IS NULL" if skip_memorywall else ""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        r = await conn.fetchrow(
+            f"SELECT AVG(valence)::float AS v, AVG(arousal)::float AS a FROM "
+            f"(SELECT valence, arousal FROM memories WHERE is_active = TRUE {mw} "
+            f"ORDER BY created_at DESC LIMIT $1) t", recent_n)
+        return {"valence": float(r["v"]) if r and r["v"] is not None else 0.0,
+                "arousal": float(r["a"]) if r and r["a"] is not None else 0.2}
+
+
 async def archive_decayed_memories(memory_ids: list):
     """②衰减归档(非合并):置 is_active=FALSE 且 decayed_at=NOW()。decayed_at 标记使 cleanup_old_fragments 豁免它——
        归档≠删除,记忆不能丢。可逆(reactivate_decayed_memories 清标复活)。"""

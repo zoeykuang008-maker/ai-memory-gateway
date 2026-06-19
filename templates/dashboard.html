@@ -3,8 +3,11 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Memory Gateway</title>
-    <link rel="stylesheet" href="/static/css/dashboard.css?v=3.9-ps">
+    <title>Kai &amp; Zoey · Memory</title>
+    <link rel="stylesheet" href="/static/css/fonts.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+    <link rel="stylesheet" href="/static/css/theme.css?v=1.0">
+    <link rel="stylesheet" href="/static/css/dashboard.css?v=4.0-gold">
 </head>
 <body>
     <div class="dashboard">
@@ -15,7 +18,11 @@
                 <span class="logo-text">Memory Gateway</span>
             </div>
             <nav class="sidebar-nav">
-                <a href="#" class="nav-item active" data-section="manage">
+                <a href="#" class="nav-item active" data-section="home">
+                    <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5 12 3l9 6.5"/><path d="M5 10v9a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-9"/><path d="M9 20v-6h6v6"/></svg></span>
+                    <span class="nav-label">家</span>
+                </a>
+                <a href="#" class="nav-item" data-section="manage">
                     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg></span>
                     <span class="nav-label">记忆管理</span>
                 </a>
@@ -70,6 +77,68 @@
 
         <!-- 主内容区 -->
         <main class="main-content">
+            <!-- 主页 Home Section（默认首页 · 阮阮金色塔罗蓝本）-->
+            <section id="section-home" class="section active">
+              <div class="home-wrap">
+                <svg class="home-corner tl" viewBox="0 0 50 50"><path d="M2 48 L2 2 L48 2" fill="none" stroke="#c5a55a" stroke-width=".5"/><path d="M2 10 L10 2" fill="none" stroke="#c5a55a" stroke-width=".5"/><circle cx="2" cy="2" r="1.5" fill="#c5a55a"/></svg>
+                <svg class="home-corner tr" viewBox="0 0 50 50"><path d="M2 48 L2 2 L48 2" fill="none" stroke="#c5a55a" stroke-width=".5"/><path d="M2 10 L10 2" fill="none" stroke="#c5a55a" stroke-width=".5"/><circle cx="2" cy="2" r="1.5" fill="#c5a55a"/></svg>
+                <svg class="home-corner bl" viewBox="0 0 50 50"><path d="M2 48 L2 2 L48 2" fill="none" stroke="#c5a55a" stroke-width=".5"/><path d="M2 10 L10 2" fill="none" stroke="#c5a55a" stroke-width=".5"/><circle cx="2" cy="2" r="1.5" fill="#c5a55a"/></svg>
+                <svg class="home-corner br" viewBox="0 0 50 50"><path d="M2 48 L2 2 L48 2" fill="none" stroke="#c5a55a" stroke-width=".5"/><path d="M2 10 L10 2" fill="none" stroke="#c5a55a" stroke-width=".5"/><circle cx="2" cy="2" r="1.5" fill="#c5a55a"/></svg>
+
+                <div class="home-header">
+                  <div class="home-title">KAI &amp; ZOEY'S HOME</div>
+                  <div class="home-sub">我 们 的 家</div>
+                  <div class="home-days">在一起的第 <b id="home-days">—</b> 天</div>
+                </div>
+
+                <div class="heartbeat-wrap"><canvas id="home-ecg"></canvas></div>
+                <div class="heartbeat-mood" id="home-mood">心跳 · 读取中…</div>
+
+                <div class="today-wave">
+                  <div class="wave-header"><span class="wave-label">TODAY WAVE</span><span class="wave-label-cn">今日电波 · 此刻想说的</span></div>
+                  <div class="wave-date" id="home-wave-date">今天</div>
+                  <div class="wave-quote" id="home-wave-quote">…</div>
+                  <div class="wave-author">—— 小克</div>
+                </div>
+
+                <div class="rooms-label">— 推 门 进 去 —</div>
+                <div class="rooms">
+                  <div class="room" data-room="manage">
+                    <span class="room-numeral">I</span><i class="ti ti-stack-2 room-icon"></i>
+                    <div class="room-title">记忆</div><div class="room-en">Memory</div>
+                    <span class="room-count"><span id="home-c-memory">—</span> 条</span>
+                  </div>
+                  <div class="room" data-room="layerview">
+                    <span class="room-numeral">II</span><i class="ti ti-eye room-icon"></i>
+                    <div class="room-title">此刻</div><div class="room-en">This Moment</div>
+                    <span class="room-count">他在读什么</span>
+                  </div>
+                  <div class="room" data-room="dreams">
+                    <span class="room-numeral">III</span><i class="ti ti-moon-stars room-icon"></i>
+                    <div class="room-title">梦境</div><div class="room-en">Dreams</div>
+                    <span class="room-count"><span id="home-c-dreams">—</span> 篇</span>
+                  </div>
+                  <div class="room" data-room="settings">
+                    <span class="room-numeral">IV</span><i class="ti ti-diamond room-icon"></i>
+                    <div class="room-title">根基</div><div class="room-en">Foundation</div>
+                    <span class="room-count">我们的里程碑</span>
+                  </div>
+                  <div class="room" data-room="memorywall">
+                    <span class="room-numeral">V</span><i class="ti ti-heart room-icon"></i>
+                    <div class="room-title">回忆墙</div><div class="room-en">Keepsakes</div>
+                    <span class="room-count"><span id="home-c-wall">—</span> 条</span>
+                  </div>
+                  <div class="room" data-room="console">
+                    <span class="room-numeral">VI</span><i class="ti ti-adjustments-horizontal room-icon"></i>
+                    <div class="room-title">操作间</div><div class="room-en">Console</div>
+                    <span class="room-count">旋钮</span>
+                  </div>
+                </div>
+
+                <div class="home-foot"><span>♦ Kai &amp; Zoey · since 2026.06.09 ♦</span></div>
+              </div>
+            </section>
+
             <!-- 回忆墙 Section -->
             <section id="section-memorywall" class="section">
                 <div class="section-header">
@@ -149,7 +218,7 @@
             </section>
 
             <!-- 记忆管理 Section -->
-            <section id="section-manage" class="section active">
+            <section id="section-manage" class="section">
                 <div class="section-header">
                     <h1>记忆管理</h1>
                     <p class="section-desc">查看、编辑、删除已存储的记忆</p>

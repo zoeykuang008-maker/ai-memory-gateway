@@ -30,7 +30,7 @@ from database import save_migrated_memory, find_memory_by_mw_id, save_photo, lin
 from database import list_memorywall, get_memorywall_one, update_memorywall, get_memory_photos, set_memory_active
 from database import get_memories_explicit_flags, set_memory_explicit, get_explicit_backfill_candidates, get_high_arousal_memories
 from database import get_decay_candidates, count_active_memories, deactivate_memories, archive_decayed_memories, reactivate_decayed_memories
-from database import count_explicit_memories, clear_persona_suggestions, clear_l5_candidates
+from database import count_explicit_memories, clear_persona_suggestions, clear_l5_candidates, get_current_mood
 from database import save_dream, get_dream, list_dreams, get_dream_dates, get_memorywall_dates
 from database import save_feel, get_recent_feels
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate
@@ -111,6 +111,8 @@ EXPLICIT_REDACT_NOTE = (
 # 人设建议自动生成：开关 + importance 门槛（默认开着但门槛抬高，平凡偏好如"回复别太长"不收；可随时关）
 PERSONA_SUGGESTION_ENABLED = os.getenv("PERSONA_SUGGESTION_ENABLED", "true").lower() == "true"
 PERSONA_SUGGESTION_MIN_IMPORTANCE = int(os.getenv("PERSONA_SUGGESTION_MIN_IMPORTANCE", "7"))
+# ② L5根基候选自动生成:提取到 is_milestone 里程碑时自动入 L5 待审。默认开(行为不变);控制台可关→阮阮纯手动 curate
+L5_AUTO_ENABLED = os.getenv("L5_AUTO_ENABLED", "true").lower() == "true"
 
 # 分区缓存
 CACHE_PARTITION_ENABLED = os.getenv("CACHE_PARTITION_ENABLED", "false").lower() == "true"
@@ -355,6 +357,7 @@ async def lifespan(app: FastAPI):
                         "MOOD_DRIFT_SKIP_MEMORYWALL": lambda v: _parse_bool(v),
                         "PERSONA_SUGGESTION_ENABLED": lambda v: _parse_bool(v),
                         "PERSONA_SUGGESTION_MIN_IMPORTANCE": int,
+                        "L5_AUTO_ENABLED": lambda v: _parse_bool(v),
                         "MEMORY_EXTRACT_ENABLED": lambda v: _parse_bool(v),
                         "L2_TODAY_ENABLED": lambda v: _parse_bool(v), "L2_REFRESH_N": int,
                         "DREAM_ENABLED": lambda v: _parse_bool(v), "DREAM_RETRIEVABLE": lambda v: _parse_bool(v),
@@ -1985,8 +1988,8 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 is_explicit=mem.get("is_explicit", False),
             )
             saved += 1
-            # ② L5根基：若是【改变关系结构的里程碑】，额外塞进 L5 待审队列（不进 L5 正文，等阮阮审）
-            if mem.get("is_milestone"):
+            # ② L5根基：若是【改变关系结构的里程碑】，额外塞进 L5 待审队列（不进 L5 正文，等阮阮审）。L5_AUTO_ENABLED 关则不自动收
+            if L5_AUTO_ENABLED and mem.get("is_milestone"):
                 try:
                     await save_l5_candidate(mem["content"], mem.get("event_date"), session_id)
                     print(f"🏛️ 里程碑→L5待审: {mem['content'][:40]}...")
@@ -5014,6 +5017,7 @@ async def save_settings(request: Request):
             "MOOD_DRIFT_SKIP_MEMORYWALL": lambda v: _parse_bool(v),
             "PERSONA_SUGGESTION_ENABLED": lambda v: _parse_bool(v),
             "PERSONA_SUGGESTION_MIN_IMPORTANCE": int,
+            "L5_AUTO_ENABLED":       lambda v: _parse_bool(v),
             "MEMORY_EXTRACT_ENABLED": lambda v: _parse_bool(v),
             "L2_TODAY_ENABLED":      lambda v: _parse_bool(v),
             "L2_REFRESH_N":          int,
@@ -5148,6 +5152,7 @@ async def api_console():
         "mood_drift":        {"on": MOOD_DRIFT_ENABLED,      "default": True,  "key": "MOOD_DRIFT_ENABLED", "sensitive": True},
         "drift_skip_mw":     {"on": MOOD_DRIFT_SKIP_MEMORYWALL, "default": True, "key": "MOOD_DRIFT_SKIP_MEMORYWALL"},
         "persona":           {"on": PERSONA_SUGGESTION_ENABLED, "default": True, "key": "PERSONA_SUGGESTION_ENABLED"},
+        "l5_auto":           {"on": L5_AUTO_ENABLED, "default": True, "key": "L5_AUTO_ENABLED"},
         "extract":           {"on": MEMORY_EXTRACT_ENABLED,  "default": True,  "key": "MEMORY_EXTRACT_ENABLED", "sensitive": True},
         "l2_today":          {"on": L2_TODAY_ENABLED,        "default": True,  "key": "L2_TODAY_ENABLED"},
         "dream":             {"on": DREAM_ENABLED,           "default": True,  "key": "DREAM_ENABLED"},
@@ -5184,6 +5189,68 @@ async def api_console():
     return {"status": "ok", "memory_enabled": MEMORY_ENABLED,
             "toggles": toggles, "numbers": numbers, "counts": counts,
             "intimacy_keys": INTIMACY_UNLOCK_KEYS}
+
+
+async def _compose_today_wave(sid: str) -> dict:
+    """今日电波一句:最近非露骨 feel(留在心里的/想说的)→ 最新梦总结(说过的)→ L2今日首句 → 默认。
+    露骨一律滤掉(landing 页,中性)。"""
+    # 1. 最近非露骨 feel
+    try:
+        for f in (await get_recent_feels(sid, 8)):
+            if f.get("is_explicit"):
+                continue
+            q = (f.get("feel") or "").strip()
+            if q:
+                return {"quote": q, "date": "留在心里的", "source": "feel"}
+    except Exception:
+        pass
+    # 2. 最新一篇梦的当日总结
+    try:
+        ds = await list_dreams(1)
+        if ds:
+            q = (ds[0].get("summary") or ds[0].get("card_title") or "").strip()
+            if q:
+                return {"quote": q[:140], "date": str(ds[0].get("dream_date") or "梦里"), "source": "dream"}
+    except Exception:
+        pass
+    # 3. L2 今日浓缩首句
+    try:
+        t = (globals().get("_l2_state", {}) or {}).get("today", "") or ""
+        t = t.strip().replace("\n", " ")
+        if t:
+            first = t.split("。")[0]
+            return {"quote": (first[:120] + "。") if first else t[:120], "date": "今天", "source": "l2"}
+    except Exception:
+        pass
+    return {"quote": "你在的每一天,我都记着。", "date": "今天", "source": "default"}
+
+
+@app.get("/api/home")
+async def api_home():
+    """主页(landing)数据:小克当下情绪(v/a→心跳)+ 今日电波一句 + 真实计数。只读聚合,不碰主链路。"""
+    out = {"status": "ok", "memory_enabled": MEMORY_ENABLED,
+           "mood": {"valence": 0.0, "arousal": 0.2, "word": ""},
+           "wave": {"quote": "你在的每一天,我都记着。", "date": "今天", "source": "default"},
+           "counts": {"memory": 0, "wall": 0, "dreams": 0}}
+    if not MEMORY_ENABLED:
+        return out
+    try:
+        m = await get_current_mood(MOOD_RECENT_N)
+        out["mood"] = {"valence": round(m["valence"], 3), "arousal": round(m["arousal"], 3),
+                       "word": mood_word(m["valence"], m["arousal"]) or ""}
+    except Exception:
+        pass
+    try:
+        out["counts"]["memory"] = await count_active_memories()
+        out["counts"]["wall"] = len(await list_memorywall())
+        out["counts"]["dreams"] = len(await get_dream_dates())
+    except Exception:
+        pass
+    try:
+        out["wave"] = await _compose_today_wave(get_active_session_id())
+    except Exception:
+        pass
+    return out
 
 
 # ============================================================

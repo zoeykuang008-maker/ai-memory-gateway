@@ -77,6 +77,9 @@ document.addEventListener('DOMContentLoaded', () => {
     loadMemories();
     // 加载导出统计
     loadExportStats();
+    // 主页（默认首页）：房间跳转 + 拉数据 + 心跳
+    initRooms();
+    loadHome();
 });
 
 // ============================================
@@ -105,6 +108,9 @@ function switchSection(name) {
     });
     
     // 切换到导出页面时刷新统计
+    if (name === 'home') {
+        loadHome();
+    }
     if (name === 'export') {
         loadExportStats();
     }
@@ -2575,4 +2581,85 @@ function fallbackCopy(txt, id) {
     ta.value = txt; document.body.appendChild(ta); ta.select();
     try { document.execCommand('copy'); showCopied(id); } catch (e) { alert('复制失败，请手动选择'); }
     document.body.removeChild(ta);
+}
+
+// ============================================
+// 主页（家）：今日电波 + 真实计数 + 心跳随小克当下情绪
+// ============================================
+let _homeMood = { valence: 0, arousal: 0.2 };
+let _ecgStarted = false;
+
+function _setH(id, v) { const e = document.getElementById(id); if (e) e.textContent = (v == null ? '—' : v); }
+
+async function loadHome() {
+    try {
+        const r = await fetch('/api/home');
+        const j = await r.json();
+        if (j.mood) {
+            _homeMood = j.mood;
+            const w = j.mood.word || '平静';
+            const me = document.getElementById('home-mood');
+            if (me) me.innerHTML = '心跳 · <b>' + w + '</b>';
+        }
+        if (j.wave) {
+            _setH('home-wave-quote', j.wave.quote || '…');
+            _setH('home-wave-date', j.wave.date || '今天');
+        }
+        if (j.counts) {
+            _setH('home-c-memory', j.counts.memory);
+            _setH('home-c-dreams', j.counts.dreams);
+            _setH('home-c-wall', j.counts.wall);
+        }
+    } catch (e) { /* 静默降级，仍画心跳 */ }
+    // 在一起的天数（since 2026-06-09）
+    const start = new Date(2026, 5, 9), now = new Date();
+    const d = Math.floor((now - start) / 86400000) + 1;
+    _setH('home-days', d > 0 ? d : 1);
+    startECG();
+}
+
+function initRooms() {
+    document.querySelectorAll('#section-home .room').forEach(el => {
+        el.addEventListener('click', () => {
+            const room = el.dataset.room;
+            if (room === 'console') { window.location.href = '/console' + window.location.search; return; }
+            switchSection(room);
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        });
+    });
+}
+
+// 心跳 ECG：速度/振幅随 arousal（当下越激动跳得越快越高）；线条金色，与主题一致
+function startECG() {
+    if (_ecgStarted) return;
+    const canvas = document.getElementById('home-ecg');
+    if (!canvas) return;
+    _ecgStarted = true;
+    const ctx = canvas.getContext('2d'), dpr = window.devicePixelRatio || 1;
+    function resize() { const r = canvas.getBoundingClientRect(); if (!r.width) return; canvas.width = r.width * dpr; canvas.height = r.height * dpr; ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.scale(dpr, dpr); }
+    resize(); window.addEventListener('resize', resize);
+    function ecg(t) { t = t % 1; if (t < 0.10) return Math.sin(t / 0.10 * Math.PI) * 0.06; if (t < 0.18) return 0; if (t < 0.22) return -0.10; if (t < 0.27) return 0.9 * Math.sin((t - 0.22) / 0.05 * Math.PI); if (t < 0.32) return -0.15; if (t < 0.48) return Math.sin((t - 0.32) / 0.16 * Math.PI) * 0.12; return 0; }
+    let cx = 0; const trail = [];
+    function draw() {
+        const r = canvas.getBoundingClientRect(), w = r.width, h = r.height;
+        if (!w) { requestAnimationFrame(draw); return; }
+        const a = Math.max(0, Math.min(1, _homeMood.arousal || 0.2));
+        const speed = 0.7 + a * 1.7, beatLen = 235 - a * 125, midY = h * 0.55, amp = h * (0.30 + a * 0.22);
+        cx += speed; if (cx > w) { cx = 0; trail.length = 0; }
+        const t = (cx % beatLen) / beatLen, y = midY - ecg(t) * amp; trail.push({ x: cx, y });
+        ctx.fillStyle = '#080c18'; ctx.fillRect(0, 0, w, h);
+        for (let i = 1; i < trail.length; i++) {
+            const ratio = (cx - trail[i].x) / w;
+            let al = ratio < 0.05 ? 0.8 : ratio < 0.3 ? 0.8 - ((ratio - 0.05) / 0.25) * 0.5 : Math.max(0.05, 0.3 - ((ratio - 0.3) / 0.7) * 0.22);
+            let lw = ratio < 0.05 ? 1.0 : ratio < 0.3 ? 1.0 - ((ratio - 0.05) / 0.25) * 0.5 : Math.max(0.2, 0.5 - ((ratio - 0.3) / 0.7) * 0.25);
+            ctx.beginPath(); ctx.moveTo(trail[i - 1].x, trail[i - 1].y); ctx.lineTo(trail[i].x, trail[i].y);
+            ctx.strokeStyle = 'rgba(197,165,90,' + al + ')'; ctx.lineWidth = lw;
+            ctx.shadowColor = ratio < 0.08 ? 'rgba(197,165,90,' + (al * 0.3) + ')' : 'transparent'; ctx.shadowBlur = ratio < 0.08 ? 3 : 0;
+            ctx.stroke();
+        }
+        ctx.shadowBlur = 0; ctx.fillStyle = '#080c18'; ctx.fillRect(cx + 2, 0, 25, h);
+        ctx.beginPath(); ctx.arc(cx, y, 2, 0, Math.PI * 2); ctx.fillStyle = 'rgba(232,213,163,0.85)'; ctx.shadowColor = 'rgba(197,165,90,0.5)'; ctx.shadowBlur = 6; ctx.fill(); ctx.shadowBlur = 0;
+        requestAnimationFrame(draw);
+    }
+    requestAnimationFrame(draw);
 }

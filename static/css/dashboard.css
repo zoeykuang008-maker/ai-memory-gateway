@@ -4,31 +4,34 @@
    配色变量
    ============================================ */
 :root {
-    --primary: #E75A7C;
-    --primary-dark: #d64d6f;
-    --primary-light: #f0899e;
-    --text: #2C363F;
-    --text-light: #6B7280;
-    --text-muted: #9ca3af;
-    --bg: #f7f6f3;
-    --card: #ffffff;
-    --border: #D6DBD2;
-    --border-light: #eceee8;
-    --success: #059669;
-    --success-bg: #ecfdf5;
-    --danger: #dc2626;
-    --danger-bg: #fef2f2;
-    --danger-hover: #b91c1c;
-    --info: #0284c7;
-    --info-bg: #f0f9ff;
-    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.03);
-    --shadow: 0 4px 20px rgba(0, 0, 0, 0.03);
-    --shadow-md: 0 4px 20px rgba(0, 0, 0, 0.06);
+    /* 金色塔罗换肤(套娃):语义变量重映射到靛黑/金。组件规则不动,整站随变量换肤。 */
+    --primary: #c5a55a;
+    --primary-dark: #b08f44;
+    --primary-light: #e8d5a3;
+    --text: #d4cbb8;
+    --text-light: #9aa0b0;
+    --text-muted: #7a8194;
+    --bg: #080c18;
+    --card: #0f1525;
+    --border: rgba(197,165,90,0.22);
+    --border-light: rgba(197,165,90,0.10);
+    --success: #7fb89a;
+    --success-bg: rgba(127,184,154,0.10);
+    --danger: #c87878;
+    --danger-bg: rgba(200,120,120,0.10);
+    --danger-hover: #d99;
+    --info: #c5a55a;
+    --info-bg: rgba(197,165,90,0.10);
+    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.25);
+    --shadow: 0 4px 20px rgba(0, 0, 0, 0.30);
+    --shadow-md: 0 8px 30px rgba(0, 0, 0, 0.40);
     --radius: 20px;
     --radius-sm: 12px;
     --radius-xs: 8px;
     --sidebar-width: 240px;
     --transition: all 0.2s ease;
+    --card-elev: #151d33;
+    --serif: 'Cormorant Garamond','Noto Serif SC','Source Han Serif SC','Songti SC','SimSun','Georgia',serif;
 }
 
 /* ============================================
@@ -1365,3 +1368,35 @@ body {
 .ps-actions { margin-left:auto; display:flex; gap:6px; }
 .ps-danger { color:var(--danger); }
 .ps-danger:hover { background:var(--danger-bg); border-color:var(--danger); }
+
+/* ============================================================
+   金色塔罗换肤 · 收尾覆盖(套娃)— 修深色下穿帮的硬编码亮色 + 字体 + 滚动条
+   语义变量已在 :root 重映射;此处只补“变量管不到”的硬编码处。功能逻辑不动。
+   ============================================================ */
+body{font-family:var(--sans,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif);}
+.logo-text,h1,h2,h3,.section-header h2{font-family:var(--serif);letter-spacing:1px;}
+/* 金底元素:白字/白描边 → 深色(对比) */
+.nav-item.active{color:var(--bg);}
+.nav-item.active .nav-icon svg{stroke:var(--bg);}
+.btn-primary{color:var(--bg);}
+.layer-tab.active{color:var(--bg);}
+/* 浅底硬编码 → 深 */
+.data-table tbody tr:hover{background:var(--card-elev);}
+.inactive-row{background:rgba(255,255,255,0.03);}
+.file-input:hover{background:var(--card-elev);}
+/* 层徽章(深色友好) */
+.layer-badge.layer-1{background:rgba(197,165,90,0.12);color:var(--text-light);}
+.layer-badge.layer-2{background:rgba(127,170,220,0.16);color:#9cc0e8;}
+.layer-badge.layer-3{background:rgba(200,120,120,0.16);color:#e0a0a0;}
+/* 回忆墙 / 人设徽章(深色友好) */
+.mw-badge.author{background:rgba(197,165,90,0.16);color:var(--gold-light);}
+.mw-badge.mood{background:rgba(200,150,80,0.16);color:#d6b06e;}
+.mw-badge.src{background:rgba(120,130,200,0.16);color:#a6b0e8;}
+.mw-badge.period{background:rgba(190,100,150,0.16);color:#d68ab0;}
+.ps-body.ps-copied{background:rgba(197,165,90,0.10);}
+.ps-badge.pending{background:rgba(197,165,90,0.16);color:var(--gold-light);}
+/* 滚动条 */
+::-webkit-scrollbar{width:9px;height:9px;}
+::-webkit-scrollbar-track{background:var(--bg);}
+::-webkit-scrollbar-thumb{background:rgba(197,165,90,0.28);border-radius:5px;}
+::-webkit-scrollbar-thumb:hover{background:rgba(197,165,90,0.45);}
