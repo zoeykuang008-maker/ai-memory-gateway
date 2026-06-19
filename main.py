@@ -32,7 +32,7 @@ from database import get_memories_explicit_flags, set_memory_explicit, get_expli
 from database import get_decay_candidates, count_active_memories, deactivate_memories, archive_decayed_memories, reactivate_decayed_memories
 from database import count_explicit_memories, clear_persona_suggestions, clear_l5_candidates, get_current_mood
 from database import save_dream, get_dream, list_dreams, get_dream_dates, get_memorywall_dates
-from database import save_feel, get_recent_feels
+from database import save_feel, get_recent_feels, get_all_feels, set_feel_explicit
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories, tag_emotions_batch, tag_explicit_batch
@@ -3158,6 +3158,77 @@ async def api_rejudge_explicit(request: Request):
 @app.get("/api/memories/rejudge-explicit/status")
 async def api_rejudge_explicit_status():
     return dict(_rejudge_status)
+
+
+_feel_rejudge_status = {"running": False, "dry_run": True, "total": 0, "done": 0,
+                        "to_true": 0, "to_false": 0, "unchanged": 0, "samples": [],
+                        "error": None, "finished_at": None}
+
+
+@app.post("/api/feels/rejudge-explicit")
+async def api_feels_rejudge_explicit(request: Request):
+    """修 feel 过标:语义重判所有 feel 的 is_explicit(haiku·非词表)——只标真露骨,温柔/动情放开。
+    dry_run=true 只出 flip 名单(撤标FALSE温柔/新标TRUE真露骨/保持TRUE验)不写;后台跑、/status 轮询。审过再 dry_run=false 写入。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    if _feel_rejudge_status["running"]:
+        return {"error": "feel 重判运行中", "status": dict(_feel_rejudge_status)}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    dry_run = bool(body.get("dry_run", True))
+    batch_size = int(body.get("batch_size", 20))
+    _feel_rejudge_status.update({"running": True, "dry_run": dry_run, "total": 0, "done": 0,
+                                 "to_true": 0, "to_false": 0, "unchanged": 0, "samples": [],
+                                 "error": None, "finished_at": None})
+
+    async def _run():
+        try:
+            feels = await get_all_feels()
+            _feel_rejudge_status["total"] = len(feels)
+            for i in range(0, len(feels), batch_size):
+                batch = feels[i:i + batch_size]
+                verdict = await tag_explicit_batch([{"id": f["id"], "content": f["content"]} for f in batch])
+                for f in batch:
+                    _feel_rejudge_status["done"] += 1
+                    v = verdict.get(f["id"])
+                    if v is None:
+                        continue  # 判别缺失→不动(safe)
+                    cur = f["is_explicit"]
+                    samp = {"id": f["id"], "c": f["content"][:80]}
+                    if v and not cur:
+                        _feel_rejudge_status["to_true"] += 1
+                        if not dry_run:
+                            await set_feel_explicit(f["id"], True)
+                        if len([s for s in _feel_rejudge_status["samples"] if s["b"] == "新标TRUE"]) < 30:
+                            _feel_rejudge_status["samples"].append({"b": "新标TRUE", **samp})
+                    elif (not v) and cur:
+                        _feel_rejudge_status["to_false"] += 1
+                        if not dry_run:
+                            await set_feel_explicit(f["id"], False)
+                        if len([s for s in _feel_rejudge_status["samples"] if s["b"] == "撤标FALSE(温柔放开)"]) < 40:
+                            _feel_rejudge_status["samples"].append({"b": "撤标FALSE(温柔放开)", **samp})
+                    else:
+                        _feel_rejudge_status["unchanged"] += 1
+                        if cur and len([s for s in _feel_rejudge_status["samples"] if s["b"] == "保持TRUE(真露骨验)"]) < 20:
+                            _feel_rejudge_status["samples"].append({"b": "保持TRUE(真露骨验)", **samp})
+                await asyncio.sleep(0.2)
+            _feel_rejudge_status["finished_at"] = datetime.now(timezone.utc).isoformat()
+            print(f"✅ feel is_explicit 重判{'(dry)' if dry_run else ''}: -FALSE {_feel_rejudge_status['to_false']}/+TRUE {_feel_rejudge_status['to_true']}/不变 {_feel_rejudge_status['unchanged']}")
+        except Exception as e:
+            _feel_rejudge_status["error"] = str(e)
+            print(f"❌ feel 重判异常: {e}")
+        finally:
+            _feel_rejudge_status["running"] = False
+
+    asyncio.create_task(_run())
+    return {"status": "started", "dry_run": dry_run}
+
+
+@app.get("/api/feels/rejudge-explicit/status")
+async def api_feels_rejudge_explicit_status():
+    return dict(_feel_rejudge_status)
 
 
 # ---- ②衰减归档：dry(只读看会淡掉谁) + 状态 + toggle(定阈值/开关) + run(mutate,gated) + undo(可逆兜底) ----

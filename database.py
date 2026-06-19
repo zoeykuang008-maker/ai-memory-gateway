@@ -1033,6 +1033,22 @@ async def get_recent_feels(session_id: str, limit: int = 8) -> list:
         return [{"content": r["content"], "is_explicit": bool(r["is_explicit"])} for r in reversed(rows)]
 
 
+async def get_all_feels() -> list:
+    """所有 feel(id/content/is_explicit),供语义重判 is_explicit(修过标)。只读。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, content, is_explicit FROM feels "
+            "WHERE content IS NOT NULL AND btrim(content) <> '' ORDER BY created_at DESC")
+        return [{"id": r["id"], "content": r["content"], "is_explicit": bool(r["is_explicit"])} for r in rows]
+
+
+async def set_feel_explicit(feel_id: int, val: bool):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE feels SET is_explicit = $2 WHERE id = $1", feel_id, bool(val))
+
+
 # ---- 回忆墙迁移辅助函数 ----
 
 async def find_memory_by_mw_id(original_id: str):

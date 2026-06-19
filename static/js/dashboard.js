@@ -2626,9 +2626,9 @@ const ROOMS = {
     memory:     { title: '记忆',   tabs: [['manage', '记忆管理']] },
     moment:     { title: '此刻',   tabs: [['layerview', '层视图·此刻所见'], ['feel', '感受流']] },
     dreams:     { title: '梦境',   tabs: [['dreams', '梦境日记']] },
-    foundation: { title: '根基',   tabs: [['settings', '里程碑·档案·人设']] },
+    foundation: { title: '根基',   tabs: [['settings', '里程碑·档案·人设'], ['import', '导入'], ['export', '导出'], ['threads', '记忆线'], ['conversations', '对话记录'], ['persona', '人设建议']] },
     wall:       { title: '回忆墙', tabs: [['memorywall', '回忆墙']] },
-    console:    { title: '操作间', tabs: [['__console', '控制台旋钮 ↗'], ['settings', '设置'], ['import', '导入'], ['export', '导出'], ['threads', '记忆线'], ['conversations', '对话记录'], ['persona', '人设建议']] },
+    console:    { title: '操作间', ext: '/console' },  // 操作间只留控制台,其余移到根基,不重复
 };
 const ROOM_ORDER = ['memory', 'moment', 'dreams', 'foundation', 'wall', 'console'];
 let _curRoom = null;
@@ -2646,6 +2646,7 @@ function initRooms() {
 function enterRoom(key) {
     const room = ROOMS[key];
     if (!room) return;
+    if (room.ext) { window.location.href = room.ext + window.location.search; return; }  // 操作间→金色控制台整页
     _curRoom = key;
     document.getElementById('room-bar').style.display = 'flex';
     document.getElementById('rb-title').textContent = room.title;
