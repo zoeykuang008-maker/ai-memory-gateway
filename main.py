@@ -5265,12 +5265,12 @@ async def api_console():
 async def _compose_today_wave(sid: str) -> dict:
     """今日电波一句:最近非露骨 feel(留在心里的/想说的)→ 最新梦总结(说过的)→ L2今日首句 → 默认。
     露骨一律滤掉(landing 页,中性)。"""
-    # 1. 最近非露骨 feel
+    # 1. 最近非露骨 feel(get_recent_feels 返回键是 content,不是 feel)
     try:
         for f in (await get_recent_feels(sid, 8)):
             if f.get("is_explicit"):
                 continue
-            q = (f.get("feel") or "").strip()
+            q = (f.get("content") or "").strip()
             if q:
                 return {"quote": q, "date": "留在心里的", "source": "feel"}
     except Exception:
