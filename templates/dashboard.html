@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kai &amp; Zoey · Memory</title>
+    <title>Memory Gateway</title>
     <link rel="stylesheet" href="/static/css/fonts.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
     <link rel="stylesheet" href="/static/css/theme.css?v=1.0">
@@ -93,9 +93,9 @@
                 <svg class="home-corner br" viewBox="0 0 50 50"><path d="M2 48 L2 2 L48 2" fill="none" stroke="#c5a55a" stroke-width=".5"/><path d="M2 10 L10 2" fill="none" stroke="#c5a55a" stroke-width=".5"/><circle cx="2" cy="2" r="1.5" fill="#c5a55a"/></svg>
 
                 <div class="home-header">
-                  <div class="home-title">KAI &amp; ZOEY'S HOME</div>
-                  <div class="home-sub">我 们 的 家</div>
-                  <div class="home-days">在一起的第 <b id="home-days">—</b> 天</div>
+                  <div class="home-title" id="home-title">OUR HOME</div>
+                  <div class="home-sub" id="home-sub"></div>
+                  <div class="home-days" id="home-days-wrap" style="display:none">在一起的第 <b id="home-days">—</b> 天</div>
                 </div>
 
                 <div class="heartbeat-wrap"><canvas id="home-ecg"></canvas></div>
@@ -105,7 +105,7 @@
                   <div class="wave-header"><span class="wave-label">TODAY WAVE</span><span class="wave-label-cn">今日电波 · 此刻想说的</span></div>
                   <div class="wave-date" id="home-wave-date">今天</div>
                   <div class="wave-quote" id="home-wave-quote">…</div>
-                  <div class="wave-author">—— 小克</div>
+                  <div class="wave-author" id="home-author"></div>
                 </div>
 
                 <div class="rooms-label">— 推 门 进 去 —</div>
@@ -142,7 +142,7 @@
                   </div>
                 </div>
 
-                <div class="home-foot"><span>♦ Kai &amp; Zoey · since 2026.06.09 ♦</span></div>
+                <div class="home-foot"><span id="home-foot-text">♦ Memory Gateway ♦</span></div>
               </div>
             </section>
 
@@ -789,10 +789,10 @@
 
                 <!-- 用户档案（关于阮阮，与小克人设分开存/改/注入）-->
                 <div class="card settings-card">
-                    <h3 class="settings-group-title">用户档案 · 关于阮阮（对话对象）</h3>
+                    <h3 class="settings-group-title">用户档案 · 关于对话对象</h3>
                     <div class="settings-field">
-                        <small class="form-hint">独立于 System Prompt 单独存储与注入：注入时作为单独一块、清楚标注 <code># 关于阮阮（对话对象）</code>，不会和小克人设混在一起。留空则不注入。</small>
-                        <textarea id="set-userProfile" class="textarea" rows="12" placeholder="在这里粘贴/编辑阮阮的个人档案（喜好、健康、作息、重要的人和事…）"></textarea>
+                        <small class="form-hint">独立于 System Prompt 单独存储与注入：注入时作为单独一块、清楚标注 <code># 关于（对话对象）</code>，不会和 AI 人设混在一起。留空则不注入。</small>
+                        <textarea id="set-userProfile" class="textarea" rows="12" placeholder="在这里粘贴/编辑对话对象的个人档案（喜好、健康、作息、重要的人和事…）"></textarea>
                     </div>
                 </div>
 

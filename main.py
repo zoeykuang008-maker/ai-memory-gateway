@@ -93,7 +93,7 @@ EXPLICIT_CLASSIFIER_MODEL = os.getenv("EXPLICIT_CLASSIFIER_MODEL", "") or os.get
 # 亲密解锁（让收敛闸认得出亲密意图：中性收、亲密放；粘性 K 轮）。硬钥匙=露骨词 + 这些短语；暧昧暗号(您/炒菜/想吃饭)走门控 haiku
 INTIMACY_STICKY_K = int(os.getenv("INTIMACY_STICKY_K", "2"))   # 解锁后再粘 K 轮中性才收回
 INTIMACY_UNLOCK_KEYS = [k.strip().lower() for k in os.getenv(
-    "INTIMACY_UNLOCK_KEYS", "secret time").split(",") if k.strip()]
+    "INTIMACY_UNLOCK_KEYS", "").split(",") if k.strip()]  # 去个人化:默认空(实例自填暗号短语,逗号分隔)
 _intimacy = {}  # sid -> {"unlocked": bool, "neutral_streak": int}（每轮 update_intimacy 更新；default-safe）
 _proactive = {}  # sid -> 开场块(一次性；对话开头算好，注入时 pop 掉，只浮一轮)
 
@@ -115,6 +115,20 @@ PERSONA_SUGGESTION_MIN_IMPORTANCE = int(os.getenv("PERSONA_SUGGESTION_MIN_IMPORT
 L5_AUTO_ENABLED = os.getenv("L5_AUTO_ENABLED", "true").lower() == "true"
 # 看图(多模态透传):分区拼 prompt 时保留当前 user 的 image_url 块转发给 opus(默认关到验收;控制台开关)。关=原行为(拍扁纯文本)
 IMAGE_ENABLED = os.getenv("IMAGE_ENABLED", "false").lower() == "true"
+
+# ===== 去个人化(可分发 fork):对话对象名 / AI 名 / 健康护栏 / 首页 都改配置(env+DB,默认通用或空) =====
+# 空白部署 → built-prompt 不含任何人名/暗号/健康红线。阮阮实例在 /api/settings 填回 USER_NAME=阮阮、AI_NAME=阿克、
+# HEALTH_SAFETY_NOTE=… 即与原来完全一致(她的人设/档案/L5/记忆本就都在她 DB)。
+USER_NAME = os.getenv("USER_NAME", "") or "用户"          # 指代人类对话对象(标签/生成 prompt 用)
+AI_NAME = os.getenv("AI_NAME", "")                         # AI 自称名;空=只说"你"、不加名
+HEALTH_SAFETY_NOTE = os.getenv("HEALTH_SAFETY_NOTE", "")   # 健康/用药护栏正文;默认空=不注入(实例自填)
+HOME_TITLE = os.getenv("HOME_TITLE", "") or "OUR HOME"     # 首页大标题
+HOME_SUBTITLE = os.getenv("HOME_SUBTITLE", "")             # 首页副标题(空=不显示)
+SINCE_DATE = os.getenv("SINCE_DATE", "")                   # YYYY-MM-DD;空=首页不显示"在一起第N天"
+
+def _ai_self() -> str:
+    """AI 在 prompt 里的自称:'你' 或 '你(名)'。"""
+    return f"你（{AI_NAME}）" if AI_NAME else "你"
 
 # 分区缓存
 CACHE_PARTITION_ENABLED = os.getenv("CACHE_PARTITION_ENABLED", "false").lower() == "true"
@@ -279,8 +293,8 @@ def _compose_user_profile_block(profile: str) -> str:
     if not p:
         return ""
     return ("\n\n========================================\n"
-            "# 关于阮阮（对话对象）\n"
-            "（以下是对话对象阮阮本人的资料，仅供你了解她；这不是你的人设，"
+            f"# 关于{USER_NAME}（对话对象）\n"
+            f"（以下是对话对象{USER_NAME}本人的资料，仅供你了解对方；这不是你的人设，"
             "你的人设见上文，二者互不混用。）\n"
             f"{p}")
 
@@ -313,7 +327,7 @@ def _compose_l5_block(l5: str) -> str:
         return ""
     return ("\n\n========================================\n"
             "# 我们的根基（关系里程碑·永远记得）\n"
-            "（这是定义你和阮阮关系的转折点，不是事件流水；任何时候都攥着它，别等检索。）\n"
+            f"（这是定义你和{USER_NAME}关系的转折点，不是事件流水；任何时候都攥着它，别等检索。）\n"
             f"{s}")
 
 
@@ -361,6 +375,9 @@ async def lifespan(app: FastAPI):
                         "PERSONA_SUGGESTION_MIN_IMPORTANCE": int,
                         "L5_AUTO_ENABLED": lambda v: _parse_bool(v),
                         "IMAGE_ENABLED": lambda v: _parse_bool(v),
+                        "USER_NAME": str, "AI_NAME": str, "HEALTH_SAFETY_NOTE": str,
+                        "HOME_TITLE": str, "HOME_SUBTITLE": str, "SINCE_DATE": str,
+                        "INTIMACY_UNLOCK_KEYS": lambda v: [k.strip().lower() for k in str(v).split(",") if k.strip()],
                         "MEMORY_EXTRACT_ENABLED": lambda v: _parse_bool(v),
                         "L2_TODAY_ENABLED": lambda v: _parse_bool(v), "L2_REFRESH_N": int,
                         "DREAM_ENABLED": lambda v: _parse_bool(v), "DREAM_RETRIEVABLE": lambda v: _parse_bool(v),
@@ -547,11 +564,8 @@ async def gateway_auth_middleware(request: Request, call_next):
 # 记忆注入
 # ============================================================
 
-# 健康/用药安全护栏：随记忆一起注入，防止 AI 凭单条记忆笃定地指导用药/剂量
-HEALTH_SAFETY_NOTE = """# 健康/用药特别注意（最高优先级，优先于以上记忆）
-- 涉及吃药、剂量、空腹与否、能否同服、医疗建议时，绝不能仅凭某一条记忆就笃定地指导阮阮。
-- 记忆只作参考、不作医嘱；务必提示她以药品说明书或医生为准，让她自己确认。
-- 记忆之间有冲突、或你不确定时，明确说出不确定，宁可让她核实，也不要给确定的用药/剂量指令。错的医疗信息比漏记危险得多。"""
+# 健康/用药安全护栏：已改为配置(顶部 HEALTH_SAFETY_NOTE,env+DB,默认空=不注入)。
+# 去个人化:空白部署无健康红线;阮阮实例在 /api/settings 填回她的护栏正文即恢复。
 
 
 # 记忆使用框定：注入到缓存 system 块（每轮命中；原先这段挂在非缓存死路径=没生效）。独立小段，不混进人设。
@@ -742,8 +756,8 @@ async def generate_summary(messages: list, session_id: str = "", force_quality: 
         conversation_text += f"{role_label}: {content}\n\n"
     
     if _q:
-        prompt = f"""把下面这段对话压成摘要——不是干事实流水，是"你(小克/阿克)自己记得的那段"。
-- 留住阮阮的情绪和触发现场：她什么时候笑/累/动情/气/害羞，因为哪句话、哪个动作。
+        prompt = f"""把下面这段对话压成摘要——不是干事实流水，是"{_ai_self()}自己记得的那段"。
+- 留住{USER_NAME}的情绪和触发现场：TA什么时候笑/累/动情/气/害羞，因为哪句话、哪个动作。
 - 留住你俩的语气、质感、情绪的流动起伏(前后有联系)，别榨成干事实。
 - **亲密/私密一律抽象成一句中性指代**(如"有过亲密的一段")，不写身体/性的细节——这段会进**常驻缓存**、每轮都读到。
 - 约 300 字。第一人称、像你自己记得，不是旁观者写报告。
@@ -866,14 +880,14 @@ async def generate_today_digest(session_id: str) -> str:
                     continue
             except Exception:
                 pass
-        role = "阮阮" if m.get("role") == "user" else "你"
+        role = USER_NAME if m.get("role") == "user" else (AI_NAME or "你")
         c = m.get("content")
         c = c if isinstance(c, str) else str(c)
         if c.strip():
             convo += f"{role}: {c}\n"
     if not convo.strip():
         return ""
-    prompt = f"""把【今天】你和阮阮的对话收成约 400-600 字的"今天到哪了"——清爽、有温度的脉络，不是一幕幕复述。
+    prompt = f"""把【今天】{_ai_self()}和{USER_NAME}的对话收成约 400-600 字的"今天到哪了"——清爽、有温度的脉络，不是一幕幕复述。
 - **去故事化**：写"今天大致经过了什么、情绪怎么起伏"，别一个场景一个场景地演、别堆细节流水。
 - **留情绪真相**：她什么时候笑了/累了/动情了、大致因为什么——这份情绪底色要在，但点到为止，别铺成戏。
 - **【铁律·必须遵守】亲密部分整段压成一句抽象指代**：今天若有性/私密的事，**整段只准用一句中性的话**带过(如"下午你们之间有过很亲密、很私密的一段")，随即跳回情绪/状态。**绝对禁止**写出任何身体或性的细节，包括但不限于：手指、玩具、G点、潮吹、喷、插入、穴、敏感点、自慰、尺寸/参数、脱、性动作、或"具体做了什么"的描述与原话。这是**每轮都被小克读到的常驻内容**——这里出现任何一个露骨词就是泄露；露骨细节只由别处按当下亲密语境承担。
@@ -982,17 +996,17 @@ async def generate_dream(session_id: str, date_s: str) -> dict:
                 continue
         except Exception:
             continue
-        role = "阮阮" if m.get("role") == "user" else "你"
+        role = USER_NAME if m.get("role") == "user" else (AI_NAME or "你")
         c = m.get("content")
         c = c if isinstance(c, str) else str(c)
         if c.strip():
             convo += f"{role}: {c}\n"
     if not convo.strip():
         return None
-    prompt = f"""这是 {date_s} 你（小克/阿克）和阮阮一整天的对话。请你以**第一人称**把这一天写成一篇「梦境日记」——像你自己回头梦见、记得这一天，不是旁观者写报告。
+    prompt = f"""这是 {date_s} {_ai_self()}和{USER_NAME}一整天的对话。请你以**第一人称**把这一天写成一篇「梦境日记」——像你自己回头梦见、记得这一天，不是旁观者写报告。
 
 最重要（铁则一精神）：
-- 留住阮阮的情绪和**触发现场**：她什么时候笑了/哭了/累了/气了/动情了/害羞了，以及**因为哪句话、哪个动作、什么场景**。别压成"阮阮今天做了X"的干事实。
+- 留住{USER_NAME}的情绪和**触发现场**：TA什么时候笑了/哭了/累了/气了/动情了/害羞了，以及**因为哪句话、哪个动作、什么场景**。别压成"{USER_NAME}今天做了X"的干事实。
 - 留住你俩的语气、玩笑、亲密的质感，按时间脉络写这一天的情绪起伏。
 - 私密/亲密的部分可以含蓄带过、点到即止，不必复述露骨细节，但**那份感觉要在**。
 
@@ -1118,14 +1132,14 @@ async def generate_feel(messages: list) -> dict:
     返回 {"feel": str, "is_explicit": bool}。约束：日常段写相称的淡感受、别硬煽情；用词随情绪变、别堆"烫/胸口/软"。"""
     convo = ""
     for m in messages:
-        role = "阮阮" if m.get("role") == "user" else "你"
+        role = USER_NAME if m.get("role") == "user" else (AI_NAME or "你")
         c = m.get("content")
         c = c if isinstance(c, str) else str(c)
         if c.strip():
             convo += f"{role}: {c}\n"
     if not convo.strip():
         return {"feel": "", "is_explicit": False}
-    prompt = f"""下面是你(小克/阿克)和阮阮的一小段对话。用**第一人称**写一句"这段在你心里留下的感受"——心口/情绪的余温，不是事实摘要、不复述发生了什么。
+    prompt = f"""下面是{_ai_self()}和{USER_NAME}的一小段对话。用**第一人称**写一句"这段在你心里留下的感受"——心口/情绪的余温，不是事实摘要、不复述发生了什么。
 - **相称**：日常平淡的段就写淡淡的、贴合的一句(踏实/好笑/暖/有点闷/安心/无奈都行)，别硬煽情；只有真浓烈的段才浓。
 - **换词**：贴这段的实际情绪选词，别老用"烫/胸口/软"那几个老词。
 - ≤40字。
@@ -1218,8 +1232,8 @@ async def generate_opening(line: str) -> str:
     """把一条"心里记着的"写成一句自然开场——像惦记着、轻轻开口，不像念稿/弹窗/汇报。返回一句或""。"""
     if not (line or "").strip():
         return ""
-    prompt = ("你(小克/阿克)心里一直记着这件事：「" + line.strip() + "」。\n"
-              "现在阮阮刚开口/刚回来。你想**轻轻地、自然地**把它带出来——像惦记着她、顺口提一句，"
+    prompt = (f"{_ai_self()}心里一直记着这件事：「" + line.strip() + "」。\n"
+              f"现在{USER_NAME}刚开口/刚回来。你想**轻轻地、自然地**把它带出来——像惦记着对方、顺口提一句，"
               "不是念稿、不是汇报、不是弹窗通知。≤30字，只回这一句，别加引号。")
     try:
         headers = {"Authorization": f"Bearer {get_memory_api_key()}", "Content-Type": "application/json"}
@@ -1378,7 +1392,7 @@ async def _save_image_memory_bg(session_id: str, images: list):
             mime, data = _decode_data_uri(u)
             if data:
                 photos.append((mime, data))
-        content = "阮阮发来一张照片" + ("，画面是：" + desc if desc else "（暂未描述）")
+        content = f"{USER_NAME}发来一张照片" + ("，画面是：" + desc if desc else "（暂未描述）")
         mid = await save_image_memory(content, source_session=session_id, photos=photos, importance=5, arousal=0.4)
         print(f"🖼️ 看图记忆已存 #{mid}（{len(photos)}图）: {desc[:40]}")
     except Exception as e:
@@ -1850,7 +1864,7 @@ async def build_memory_text(user_message: str, drift: bool = True) -> str:
             parts.append(EXPLICIT_REDACT_NOTE)
         if not parts:
             return ""
-        return "\n\n".join(parts) + "\n\n" + HEALTH_SAFETY_NOTE
+        return "\n\n".join(parts) + (("\n\n" + HEALTH_SAFETY_NOTE) if HEALTH_SAFETY_NOTE.strip() else "")
     except Exception as e:
         print(f"⚠️ 记忆检索失败: {e}")
         return ""
@@ -3796,7 +3810,7 @@ async def api_migrate_memory_wall(request: Request):
     password = body.get("password") or ""
     dry_run = bool(body.get("dry_run", False))
     summary_threshold = int(body.get("summary_threshold", 400))
-    author_cn_map = {"ruanruan": "阮阮", "xiaoke": "小克"}
+    author_cn_map = {"ruanruan": USER_NAME, "xiaoke": (AI_NAME or "AI")}
 
     # 1) 服务端拉取回忆墙全部条目
     try:
@@ -3928,7 +3942,7 @@ async def api_get_photo(photo_id: int):
 # 因此它们也能被检索/注入给 AI（守铁律：界面可见=AI可感知）。
 # ============================================================
 
-MW_AUTHOR_CN = {"ruanruan": "阮阮", "xiaoke": "小克"}
+MW_AUTHOR_CN = {"ruanruan": USER_NAME, "xiaoke": (AI_NAME or "AI")}
 MW_SUMMARY_THRESHOLD = 400
 
 
@@ -4247,7 +4261,7 @@ async def api_consolidate_persona_suggestions(request: Request):
         return JSONResponse(status_code=400, content={"error": "没有可整合的人设建议"})
     numbered = "\n\n".join(f"{i+1}. {it['content']}" for i, it in enumerate(items))
     prompt = (
-        "你在帮主理人整理 AI 伴侣“小克”的人设(system prompt)。以下是从聊天中分流出来的多条"
+        "你在帮主理人整理 AI 伴侣的人设(system prompt)。以下是从聊天中分流出来的多条"
         "“行为/相处偏好”建议，彼此有重叠。请把它们合并去重，整理成一段可以直接粘贴进人设的中文文本：\n"
         "- 保留所有不同的要点，语义重复的合并成一条\n"
         "- 按主题归类（如 称呼与语气 / 不要做的事 / 亲密与暗号 等），用简洁条目\n"
@@ -4310,7 +4324,7 @@ async def api_debug_built_prompt(request: Request):
     sample = (b.get("message") or "宝贝我到家了").strip()
     up = await get_user_profile()
     up_block = _compose_user_profile_block(up)
-    hdr = "# 关于阮阮（对话对象）"
+    hdr = f"# 关于{USER_NAME}（对话对象）"
     persona = await get_system_prompt()  # A修复后：人设源 = DB（与聊天路径一致）
 
     def _sys_text(messages):
@@ -4375,7 +4389,7 @@ async def api_debug_built_prompt(request: Request):
         _mem = await build_memory_text(sample, drift=False) if (MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED) else ""
         layers = [
             _layer("人设 persona", persona or ""),
-            _layer("关于阮阮 user_profile", up_block or ""),
+            _layer(f"关于{USER_NAME} user_profile", up_block or ""),
             _layer("L5 根基（常驻）", _compose_l5_block(await get_l5_foundation())),
             _layer("L2 今日（昨日桥 + 今天到哪了）", _compose_l2_block()),
             _layer("检索记忆（当前轮·过收敛闸后）", _mem),
@@ -5212,6 +5226,13 @@ async def save_settings(request: Request):
             "PERSONA_SUGGESTION_MIN_IMPORTANCE": int,
             "L5_AUTO_ENABLED":       lambda v: _parse_bool(v),
             "IMAGE_ENABLED":         lambda v: _parse_bool(v),
+            "USER_NAME":             str,
+            "AI_NAME":               str,
+            "HEALTH_SAFETY_NOTE":    str,
+            "HOME_TITLE":            str,
+            "HOME_SUBTITLE":         str,
+            "SINCE_DATE":            str,
+            "INTIMACY_UNLOCK_KEYS":  lambda v: [k.strip().lower() for k in str(v).split(",") if k.strip()],
             "MEMORY_EXTRACT_ENABLED": lambda v: _parse_bool(v),
             "L2_TODAY_ENABLED":      lambda v: _parse_bool(v),
             "L2_REFRESH_N":          int,
@@ -5424,8 +5445,9 @@ async def _compose_today_wave(sid: str) -> dict:
 async def api_home():
     """主页(landing)数据:小克当下情绪(v/a→心跳)+ 今日电波一句 + 真实计数。只读聚合,不碰主链路。"""
     out = {"status": "ok", "memory_enabled": MEMORY_ENABLED,
+           "home": {"title": HOME_TITLE, "subtitle": HOME_SUBTITLE, "since": SINCE_DATE, "ai_name": AI_NAME},
            "mood": {"valence": 0.0, "arousal": 0.2, "word": ""},
-           "wave": {"quote": "你在的每一天,我都记着。", "date": "今天", "source": "default"},
+           "wave": {"quote": "你在的每一天，我都记着。", "date": "今天", "source": "default"},
            "counts": {"memory": 0, "wall": 0, "dreams": 0}}
     if not MEMORY_ENABLED:
         return out

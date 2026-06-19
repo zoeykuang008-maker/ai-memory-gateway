@@ -8,6 +8,60 @@ Give your AI long-term memory. A lightweight proxy gateway that adds a memory la
 
 ---
 
+## 🧑‍🤝‍🧑 朋友向 · 五分钟上手（Zeabur，零代码）
+
+> **一个仓库原则**：大家用同一份代码，但**你的人设、档案、记忆全在你自己的数据库里**，和别人完全隔离。代码通用、数据各在各的库。
+
+**① 拿一个 OpenRouter Key（LLM 按量付费，几美元能聊很久）**
+1. 打开 <https://openrouter.ai> 注册/登录
+2. 右上头像 → **Keys** → Create Key → 复制（形如 `sk-or-v1-...`）
+3. 到 **Credits** 充一点额度
+
+**② Fork + 部署到 Zeabur**
+1. 本仓库右上角 **Fork** 到你自己的 GitHub
+2. 打开 <https://zeabur.com> → 用 GitHub 登录 → New Project
+3. Add Service → **Git** → 选你 fork 的仓库（自动识别 Dockerfile）
+4. 同一个 Project 里再 Add Service → **Prepackaged → PostgreSQL**（一键起库）
+5. 点网关服务 → **Variables**，填：
+
+| 变量 | 值 |
+|---|---|
+| `DATABASE_URL` | 点 Postgres 服务复制它的连接串 `postgresql://...` |
+| `GATEWAY_SECRET` | 你自己随便设一串密码（别人没它进不了你的面板/接口）|
+| `API_KEY` | 你的 OpenRouter Key `sk-or-v1-...` |
+| `API_BASE_URL` | `https://openrouter.ai/api/v1/chat/completions` |
+| `DEFAULT_MODEL` | `anthropic/claude-sonnet-4.5`（或你喜欢的）|
+| `MEMORY_ENABLED` | `true` |
+| `MEMORY_MODEL` | `anthropic/claude-haiku-4.5`（提取/摘要用便宜小模型）|
+
+6. 部署 → 拿到网址 `https://xxx.zeabur.app`
+
+**③ 设人设 + 接客户端**
+1. 打开 `https://xxx.zeabur.app/dashboard?gateway_key=你的GATEWAY_SECRET`
+2. 在「设置 / 根基」里写 AI 人设（systemPrompt）、可选「关于对话对象」档案、关系里程碑
+3. 客户端（Kelivo 等）：API 地址填 `https://xxx.zeabur.app/v1`、API Key 随便填一个、模型填你设的 `DEFAULT_MODEL`
+
+**④ 升级（拿作者后续更新，数据无损）**
+1. **先备份**：dashboard「导出备份」下载记忆 JSON（升级前习惯性存一份）
+2. 你的 fork 仓库页 → **Sync fork** → Update branch
+3. Zeabur 自动重新部署；数据库表**自动迁移、数据不丢**（人设/记忆都在 DB，不随代码更新动）
+4. 留意发布说明里有没有**新增环境变量**要补
+
+### 个性化（全部可选，默认通用 → 空白部署不含任何人名/暗号/健康红线）
+| 变量 | 说明 | 默认 |
+|---|---|---|
+| `USER_NAME` | 对话对象的名字（注入标签 / 摘要 / 梦里如何称呼 TA）| `用户` |
+| `AI_NAME` | AI 的自称名 | 空（只说"你"）|
+| `HOME_TITLE` / `HOME_SUBTITLE` | 主页大标题 / 副标题 | `OUR HOME` |
+| `SINCE_DATE` | `YYYY-MM-DD`，主页显示"在一起第 N 天" | 空（不显示）|
+| `HEALTH_SAFETY_NOTE` | 健康/用药护栏正文（随记忆一起注入）| 空（不注入）|
+| `INTIMACY_UNLOCK_KEYS` | 亲密解锁暗号短语，英文逗号分隔 | 空 |
+| `IMAGE_ENABLED` | 看图（把图片透传给模型 + 看完存文字描述记忆）| `false` |
+
+> 以上也能在 dashboard 设置页改，热更新、重启保留。完整变量见下方各阶段说明。
+
+---
+
 ## ✨ 功能
 
 - **自定义人设** — 把你的 system prompt 写在 `system_prompt.txt`，每次对话自动注入

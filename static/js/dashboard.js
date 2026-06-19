@@ -2613,11 +2613,20 @@ async function loadHome() {
             _setH('home-c-dreams', j.counts.dreams);
             _setH('home-c-wall', j.counts.wall);
         }
+        // 去个人化:标题/副标/作者/起始日 从配置(/api/home.home)填,不写死
+        const H = j.home || {};
+        if (H.title) _setH('home-title', H.title);
+        const subEl = document.getElementById('home-sub'); if (subEl) subEl.textContent = H.subtitle || '';
+        const authEl = document.getElementById('home-author'); if (authEl) authEl.textContent = H.ai_name ? ('—— ' + H.ai_name) : '';
+        const dw = document.getElementById('home-days-wrap');
+        if (H.since && /^\d{4}-\d{2}-\d{2}$/.test(H.since)) {
+            const p = H.since.split('-'); const start = new Date(+p[0], +p[1] - 1, +p[2]);
+            const d = Math.floor((new Date() - start) / 86400000) + 1;
+            _setH('home-days', d > 0 ? d : 1); if (dw) dw.style.display = '';
+        } else if (dw) { dw.style.display = 'none'; }
+        const foot = document.getElementById('home-foot-text');
+        if (foot) foot.textContent = '♦ ' + (H.title || 'Memory Gateway') + (H.since ? (' · since ' + H.since) : '') + ' ♦';
     } catch (e) { /* 静默降级，仍画心跳 */ }
-    // 在一起的天数（since 2026-06-09）
-    const start = new Date(2026, 5, 9), now = new Date();
-    const d = Math.floor((now - start) / 86400000) + 1;
-    _setH('home-days', d > 0 ? d : 1);
     startECG();
 }
 
