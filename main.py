@@ -401,6 +401,13 @@ async def lifespan(app: FastAPI):
                     print(f"💗 feel 开关(DB恢复)：{globals()['FEEL_ENABLED']}")
             except Exception:
                 pass
+            try:
+                _pe = await get_gateway_config("proactive_enabled", "")
+                if _pe != "":
+                    globals()["PROACTIVE_ENABLED"] = (str(_pe).lower() == "true")
+                    print(f"💬 主动浮现开关(DB恢复)：{globals()['PROACTIVE_ENABLED']}")
+            except Exception:
+                pass
         except Exception as e:
             print(f"⚠️  数据库初始化失败: {e}")
             print("⚠️  记忆系统将不可用，但网关仍可正常转发")
@@ -2796,6 +2803,26 @@ async def api_feel_status():
     return {"feel_enabled": FEEL_ENABLED}
 
 
+@app.post("/api/proactive/toggle")
+async def api_proactive_toggle(request: Request):
+    """运行时切换 ④ 主动浮现总开关，持久化 gateway_config、启动恢复。body: {enabled: true/false}"""
+    global PROACTIVE_ENABLED
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    val = bool(body.get("enabled"))
+    PROACTIVE_ENABLED = val
+    await set_gateway_config("proactive_enabled", "true" if val else "false")
+    print(f"💬 主动浮现开关 → {val}")
+    return {"status": "ok", "proactive_enabled": val}
+
+
+@app.get("/api/proactive")
+async def api_proactive_status():
+    return {"proactive_enabled": PROACTIVE_ENABLED, "gap_hours": PROACTIVE_GAP_HOURS}
+
+
 @app.post("/api/l2/dry")
 async def api_l2_dry(request: Request):
     """L2 dry-run（只读·不写）：用新 prompt 对活跃线今天跑一遍 generate_today_digest，看新样子。"""
@@ -2851,7 +2878,13 @@ async def api_proactive_dry(request: Request):
     for c in cands[:6]:
         op = await generate_opening(c["line"])
         out.append({"source": c["source"], "line": c["line"][:60], "opening": op})
-    return {"dry_run": True, "session": sid, "model": PROACTIVE_MODEL, "count": len(out), "candidates": out}
+    live_block = ""
+    for o in out:
+        if o.get("opening"):
+            live_block = "〔开场·你心里还惦着，若自然可轻轻提起，别硬塞、别像念稿〕\n" + o["opening"]
+            break
+    return {"dry_run": True, "session": sid, "model": PROACTIVE_MODEL, "count": len(out),
+            "candidates": out, "live_block": live_block}
 
 
 _rejudge_status = {"running": False, "dry_run": True, "total": 0, "done": 0,
