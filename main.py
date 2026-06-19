@@ -93,6 +93,7 @@ INTIMACY_STICKY_K = int(os.getenv("INTIMACY_STICKY_K", "2"))   # 解锁后再粘
 INTIMACY_UNLOCK_KEYS = [k.strip().lower() for k in os.getenv(
     "INTIMACY_UNLOCK_KEYS", "secret time").split(",") if k.strip()]
 _intimacy = {}  # sid -> {"unlocked": bool, "neutral_streak": int}（每轮 update_intimacy 更新；default-safe）
+_proactive = {}  # sid -> 开场块(一次性；对话开头算好，注入时 pop 掉，只浮一轮)
 
 # is_explicit 收敛（阮阮要的方案）：命中露骨/私密记忆时不注入原文场景，收敛成一句定向指令——
 # 让小克「懂暗号→回应当下→别复述/罗列过去私密细节」。运行时开关（gateway_config 持久化），默认关，启动时恢复。
@@ -1369,6 +1370,10 @@ async def build_partitioned_messages(
                 _fblk = _compose_feel_block(await get_recent_feels(_fsid))
                 if _fblk:
                     parts.append(_fblk)
+        if PROACTIVE_ENABLED:
+            _pblk = _proactive.pop(get_active_session_id(), "")
+            if _pblk:
+                parts.append(_pblk)
 
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
             mem_text = await build_memory_text(user_message, drift=drift)
@@ -1431,6 +1436,10 @@ async def _build_basic_cached(
                 _fblk = _compose_feel_block(await get_recent_feels(_fsid))
                 if _fblk:
                     parts.append(_fblk)
+        if PROACTIVE_ENABLED:
+            _pblk = _proactive.pop(get_active_session_id(), "")
+            if _pblk:
+                parts.append(_pblk)
 
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
             mem_text = await build_memory_text(user_message, drift=drift)
@@ -2024,7 +2033,28 @@ async def chat_completions(request: Request):
         except Exception as e:
             print(f"[warning] 分区模式读取历史失败: {e}")
             db_msgs = []
-        
+
+        # ④ 主动浮现：对话开头(距上条消息 > PROACTIVE_GAP_HOURS=当天首轮/长间隔后)→算一句"开场"，一次性注入本轮。默认关。
+        _proactive.pop(session_id, None)
+        if PROACTIVE_ENABLED and user_message:
+            try:
+                _ts_list = []
+                for _m in (db_history or []):
+                    _t = _m.get("created_at")
+                    if _t is not None:
+                        _ts_list.append(_t if getattr(_t, "tzinfo", None) else _t.replace(tzinfo=timezone.utc))
+                _gap_ok = (not _ts_list) or ((datetime.now(timezone.utc) - max(_ts_list)).total_seconds() > PROACTIVE_GAP_HOURS * 3600)
+                if _gap_ok and _ts_list:  # 有历史且确是长间隔/新开头(首条对话不浮)
+                    _cands = await pick_proactive_candidates(session_id)
+                    if _cands:
+                        import random
+                        _op = await generate_opening(random.choice(_cands)["line"])
+                        if _op:
+                            _proactive[session_id] = "〔开场·你心里还惦着，若自然可轻轻提起，别硬塞、别像念稿〕\n" + _op
+                            print(f"💬 主动浮现(开头): {_op[:30]}")
+            except Exception as _pe:
+                print(f"⚠️ 主动浮现失败: {_pe}")
+
         # 提取客户端新消息（非system），可能是user、tool、或带tool_calls的assistant
         client_new_msgs = [m for m in messages if m.get("role") != "system"]
         # 分区模式下，assistant消息来自上一轮response（DB里已存），过滤掉避免重复
@@ -2842,6 +2872,7 @@ async def api_rejudge_explicit(request: Request):
     except Exception:
         body = {}
     dry_run = bool(body.get("dry_run", True))
+    true_only = bool(body.get("true_only", False))  # 只写新标TRUE(堵漏)、不撤标(避免误撤露骨)
     threshold = float(body.get("threshold", 0.55))
     batch_size = int(body.get("batch_size", 20))
     _rejudge_status.update({"running": True, "dry_run": dry_run, "total": 0, "done": 0,
@@ -2870,7 +2901,7 @@ async def api_rejudge_explicit(request: Request):
                             _rejudge_status["samples"].append({"b": "新标TRUE", **samp})
                     elif (not v) and cur:
                         _rejudge_status["to_false"] += 1
-                        if not dry_run:
+                        if not dry_run and not true_only:
                             await set_memory_explicit(m["id"], False)
                         if len([s for s in _rejudge_status["samples"] if s["b"] == "撤标FALSE"]) < 30:
                             _rejudge_status["samples"].append({"b": "撤标FALSE", **samp})
