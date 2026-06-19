@@ -778,6 +778,38 @@ async def save_memory(content: str, importance: int = 5, source_session: str = "
                 print(f"⚠️ 记忆 {row['id']} embedding自动计算失败: {e}")
 
 
+async def save_image_memory(content: str, source_session: str = "", photos=None,
+                            importance: int = 5, valence: float = 0.0, arousal: float = 0.4) -> int:
+    """看图记忆:存一条文字描述记忆 + 关联图片(memory_photos,长期可取 /api/photos/id)。返回 memory_id。
+    自带 embedding(可检索→下轮记得)。photos=[(mime, bytes), ...]。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        _val = max(-1.0, min(1.0, float(valence or 0.0)))
+        _aro = max(0.0, min(1.0, float(arousal if arousal is not None else 0.4)))
+        row = await conn.fetchrow(
+            "INSERT INTO memories (content, importance, source_session, valence, arousal) "
+            "VALUES ($1, $2, $3, $4, $5) RETURNING id",
+            content, importance, source_session, _val, _aro)
+        mid = row['id']
+        for (mime, data) in (photos or []):
+            if not data:
+                continue
+            try:
+                await conn.execute(
+                    "INSERT INTO memory_photos (memory_id, original_name, mime, data) VALUES ($1, $2, $3, $4)",
+                    mid, "chat_image", (mime or 'image/png'), data)
+            except Exception as e:
+                print(f"⚠️ 看图记忆 #{mid} 存图失败: {e}")
+        if MEMORY_VECTOR_ENABLED:
+            try:
+                emb = await compute_embedding(content)
+                if emb:
+                    await save_memory_embedding(conn, mid, emb)
+            except Exception:
+                pass
+        return mid
+
+
 # ---- is_explicit 露骨标记（注入收敛 + 回填用）----
 
 async def get_memories_explicit_flags(ids: list) -> dict:

@@ -32,7 +32,7 @@ from database import get_memories_explicit_flags, set_memory_explicit, get_expli
 from database import get_decay_candidates, count_active_memories, deactivate_memories, archive_decayed_memories, reactivate_decayed_memories
 from database import count_explicit_memories, clear_persona_suggestions, clear_l5_candidates, get_current_mood
 from database import save_dream, get_dream, list_dreams, get_dream_dates, get_memorywall_dates
-from database import save_feel, get_recent_feels, get_all_feels, set_feel_explicit
+from database import save_feel, get_recent_feels, get_all_feels, set_feel_explicit, save_image_memory
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories, tag_emotions_batch, tag_explicit_batch
@@ -1313,6 +1313,78 @@ def _apply_breakpoint(msg: dict) -> bool:
     return False
 
 
+def _decode_data_uri(uri: str):
+    """data:image/png;base64,xxxx → (mime, bytes)。非 data uri 返回 (None, None)。"""
+    import base64
+    try:
+        if not isinstance(uri, str) or not uri.startswith("data:"):
+            return (None, None)
+        head, b64 = uri.split(",", 1)
+        mime = head[5:].split(";")[0] or "image/png"
+        return (mime, base64.b64decode(b64))
+    except Exception:
+        return (None, None)
+
+
+def _extract_image_uris(messages: list) -> list:
+    """从最近一条 user 消息抽出 image_url(data uri)。供看图记忆。"""
+    for m in reversed(messages or []):
+        if m.get("role") == "user" and isinstance(m.get("content"), list):
+            out = []
+            for b in m["content"]:
+                if isinstance(b, dict) and b.get("type") == "image_url":
+                    u = b.get("image_url")
+                    us = (u.get("url") if isinstance(u, dict) else u) or ""
+                    if isinstance(us, str) and us.startswith("data:"):
+                        out.append(us)
+            return out
+    return []
+
+
+async def describe_images(data_uris: list) -> str:
+    """haiku(vision)给图生成一两句中文描述。失败返回 ''。"""
+    if not get_memory_api_key() or not data_uris:
+        return ""
+    content = [{"type": "text", "text": "用一两句简短中文描述这张图的主要内容(是什么/谁/在做什么/什么场景)。只客观描述,别评论、别问。"}]
+    for u in data_uris[:3]:
+        content.append({"type": "image_url", "image_url": {"url": u}})
+    try:
+        headers = {"Authorization": f"Bearer {get_memory_api_key()}", "Content-Type": "application/json"}
+        if "openrouter" in API_BASE_URL:
+            headers["HTTP-Referer"] = EXTRA_REFERER
+            headers["X-Title"] = EXTRA_TITLE
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(API_BASE_URL, headers=headers, json={
+                "model": CACHE_SUMMARY_MODEL, "max_tokens": 200,
+                "messages": [{"role": "user", "content": content}]})
+            if r.status_code == 200:
+                d = r.json()
+                if "choices" in d:
+                    return (d["choices"][0]["message"]["content"] or "").strip()
+            print(f"⚠️ 看图描述 HTTP {r.status_code}")
+    except Exception as e:
+        print(f"⚠️ 看图描述失败: {e}")
+    return ""
+
+
+async def _save_image_memory_bg(session_id: str, images: list):
+    """看图记忆(后台·铁律):描述图 → 存「阮阮发来一张照片:…」记忆 + 关联图片(下轮可检索记得,/api/photos/id 长期可取)。"""
+    if not images:
+        return
+    try:
+        desc = await describe_images(images)
+        photos = []
+        for u in images[:3]:
+            mime, data = _decode_data_uri(u)
+            if data:
+                photos.append((mime, data))
+        content = "阮阮发来一张照片" + ("，画面是：" + desc if desc else "（暂未描述）")
+        mid = await save_image_memory(content, source_session=session_id, photos=photos, importance=5, arousal=0.4)
+        print(f"🖼️ 看图记忆已存 #{mid}（{len(photos)}图）: {desc[:40]}")
+    except Exception as e:
+        print(f"⚠️ 看图记忆失败: {e}")
+
+
 def _assemble_current_user(parts: list, current_user_msg: dict) -> dict:
     """拼「当前 user」消息:注入块(parts:时间/记忆/feel/proactive…)+ 原文。
     IMAGE_ENABLED 且原 content 是多模态 list 时:注入+原文本合成首个 text 块、保留 image_url 等媒体块(透传给 opus);
@@ -1788,7 +1860,7 @@ async def build_memory_text(user_message: str, drift: bool = True) -> str:
 # 后台记忆处理
 # ============================================================
 
-async def process_memories_background(session_id: str, user_msg: str, assistant_msg: str, model: str, context_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, assistant_tool_calls: list = None, assistant_reasoning: str = None):
+async def process_memories_background(session_id: str, user_msg: str, assistant_msg: str, model: str, context_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, assistant_tool_calls: list = None, assistant_reasoning: str = None, images: list = None):
     """
     后台异步：存储对话 + 提取记忆（不阻塞主流程）
     
@@ -1813,7 +1885,11 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
               f"assistant_tool_calls={len(assistant_tool_calls) if assistant_tool_calls else 0}, skip={skip_conversation_log}")
         if tool_messages:
             print(f"💾 tool详情: {[{'role': m.get('role'), 'tool_call_id': m.get('tool_call_id', '?')} for m in tool_messages]}")
-        
+
+        # 看图记忆(铁律):本轮带图 → 后台描述+存记忆(下轮可检索记得),独立于提取间隔
+        if IMAGE_ENABLED and images and not skip_conversation_log:
+            asyncio.create_task(_save_image_memory_bg(session_id, images))
+
         # 1. 存储对话记录（除非明确跳过）
         if skip_conversation_log:
             print(f"⏭️  跳过对话存储（辅助请求）")
@@ -2111,6 +2187,7 @@ async def chat_completions(request: Request):
     body = await request.json()
     messages = body.get("messages", [])
     _capture_multimodal(messages)  # 诊断:记录入口 content 结构(只读快照)
+    _turn_images = _extract_image_uris(messages) if IMAGE_ENABLED else []  # 看图记忆:本轮原图(交后台)
 
     # ---------- 检测是否应跳过对话存储 ----------
     # 客户端通过header显式声明（如标题生成等辅助请求）
@@ -2393,7 +2470,7 @@ async def chat_completions(request: Request):
                         process_memories_background(session_id, user_message, assistant_msg, model,
                                                     context_messages=original_messages, skip_conversation_log=(skip_conversation_log or _sync_conv),
                                                     tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
-                                                    assistant_reasoning=assistant_reasoning)
+                                                    assistant_reasoning=assistant_reasoning, images=_turn_images)
                     )
 
                 return JSONResponse(status_code=200, content=resp_data)
@@ -2521,7 +2598,7 @@ async def stream_and_capture(headers: dict, body: dict, session_id: str, user_me
             process_memories_background(session_id, user_message, assistant_msg, model,
                                         context_messages=original_messages, skip_conversation_log=(skip_conversation_log or sync_conv),
                                         tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
-                                        assistant_reasoning=assistant_reasoning)
+                                        assistant_reasoning=assistant_reasoning, images=_turn_images)
         )
 
 
