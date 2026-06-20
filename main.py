@@ -4391,6 +4391,81 @@ async def api_debug_built_prompt(request: Request):
     return out
 
 
+@app.get("/api/debug/token-breakdown")
+async def api_debug_token_breakdown(message: str = "宝贝我到家了"):
+    """单轮注入的 token 分解:每层 chars/估算tokens/占比 + 缓存vs非缓存(缓存按0.1x折算实际成本)。
+    只读、drift=False(不触发漂移)、不调上游。token 为 CJK感知估算(中文~0.7tok/字,英文~0.25tok/字)。"""
+    sid = get_active_session_id()
+
+    def est(s):
+        s = s or ""
+        cjk = sum(1 for ch in s if ('㐀' <= ch <= '鿿') or ('＀' <= ch <= '￯') or ('　' <= ch <= '〿'))
+        return int(round(cjk * 0.7 + (len(s) - cjk) / 4.0))
+
+    persona = await get_system_prompt() or ""
+    up_block = _compose_user_profile_block(await get_user_profile()) or ""
+    l5 = _compose_l5_block(await get_l5_foundation()) or ""
+    guidance = MEMORY_GUIDANCE or ""
+    state = await get_session_cache_state(sid) if sid else {}
+    summary_parts = state.get("summary_parts") or []
+    summary_text = "\n".join(summary_parts)
+    a_start = state.get("a_start_round", 0)
+    history = await get_conversation_messages(sid, limit=100000) if sid else []
+    rounds = group_by_rounds(history)
+    X = CACHE_PARTITION_X
+    a_msgs = [m for rnd in rounds[a_start:a_start + X] for m in rnd]
+    b_msgs = [m for rnd in rounds[a_start + X:] for m in rnd]
+    a_text = "\n".join((m.get("content") or "") for m in a_msgs if isinstance(m.get("content"), str))
+    b_text = "\n".join((m.get("content") or "") for m in b_msgs if isinstance(m.get("content"), str))
+    time_inj = build_time_injection(history[-1].get("created_at") if history else None) or ""
+    l2 = _compose_l2_block() or ""
+    feel = ""
+    try:
+        if FEEL_ENABLED and sid:
+            feel = _compose_feel_block(await get_recent_feels(sid)) or ""
+    except Exception:
+        feel = ""
+    mem = ""
+    try:
+        if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED:
+            mem = await build_memory_text(message, drift=False) or ""
+    except Exception:
+        mem = ""
+
+    rows = [
+        ("人设 persona", persona, True), ("档案 user_profile", up_block, True),
+        ("L5 根基", l5, True), ("MEMORY_GUIDANCE", guidance, True),
+        ("滚动摘要", summary_text, True), ("A区逐字历史", a_text, True), ("B区逐字历史", b_text, True),
+        ("时间注入", time_inj, False), ("L2今日+昨日桥", l2, False), ("feel 感受", feel, False),
+        ("检索记忆", mem, False), ("当前消息", message, False),
+    ]
+    layers = []
+    for name, txt, cached in rows:
+        layers.append({"layer": name, "chars": len(txt or ""), "tokens_est": est(txt), "cached": cached})
+    tot = sum(l["tokens_est"] for l in layers) or 1
+    for l in layers:
+        l["pct"] = round(100.0 * l["tokens_est"] / tot, 1)
+        l["eff_tokens"] = round(l["tokens_est"] * (0.1 if l["cached"] else 1.0), 1)
+    cached_tok = sum(l["tokens_est"] for l in layers if l["cached"])
+    noncache_tok = sum(l["tokens_est"] for l in layers if not l["cached"])
+    persona_tok = next(l["tokens_est"] for l in layers if l["layer"].startswith("人设"))
+    summary_tok = next(l["tokens_est"] for l in layers if l["layer"] == "滚动摘要")
+    return {
+        "session": sid, "sample_message": message,
+        "partition_x": X, "rounds_total": len(rounds), "a_start_round": a_start,
+        "a_rounds": min(X, max(0, len(rounds) - a_start)), "b_rounds": max(0, len(rounds) - a_start - X),
+        "summary_parts": len(summary_parts),
+        "persona_len": len(persona), "persona_is_placeholder": ("温柔耐心的AI助手" in persona or len(persona) < 800),
+        "layers": layers,
+        "total_tokens_est": tot,
+        "cached_tokens_est": cached_tok, "noncache_tokens_est": noncache_tok,
+        "noncache_pct_of_total": round(100.0 * noncache_tok / tot, 1),
+        "effective_total_per_turn_est": round(sum(l["eff_tokens"] for l in layers), 1),
+        "summary_cached_eff_per_turn_est": round(summary_tok * 0.1, 1),
+        "persona_tokens_est": persona_tok, "persona_pct_of_total": round(100.0 * persona_tok / tot, 1),
+    }
+
+
 @app.post("/api/debug/memory-gate")
 async def api_debug_memory_gate(request: Request):
     """只读演示 ②/① 露骨语境闸：给一条 user 消息，返回检索原始命中(arousal/score) +
