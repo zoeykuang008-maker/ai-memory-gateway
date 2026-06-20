@@ -810,6 +810,71 @@ async def generate_summary(messages: list, session_id: str = "", force_quality: 
         return ""
 
 
+async def _roll_early_summary(old_parts: list, target: int = 520) -> str:
+    """滚动摘要封顶:把更老的若干段摘要卷成一块「早期小结」——保留定义性大事(可升L5/回忆墙的),去routine日常。
+    进常驻缓存→必 scrub 露骨。返回卷后正文(失败返回空)。"""
+    if not old_parts:
+        return ""
+    joined = "\n\n".join(f"[第{i+1}段] {p}" for i, p in enumerate(old_parts))
+    prompt = f"""下面是 {USER_NAME} 和 {_ai_self()} 更早的若干段对话摘要(按时间先后)。把它们卷成一块紧凑的「早期小结」:
+- **保留定义性的大事**:关系结构的改变、重要的第一次、承诺与约定、身份/称呼的确立、反复出现的核心主题——这些主旨一条都别丢。
+- 普通日常的 texture(吃喝、寒暄、重复的小事)可高度概括或略去。
+- 亲密/私密一律抽象成一句中性指代(如"有过亲密的一段"),不写身体/性细节——这段进**常驻缓存**、每轮都读。
+- 第三人称、按时间脉络、有温度但紧凑,控制在 {target} 字以内。
+摘要们:
+---
+{joined}
+---
+只输出早期小结正文。"""
+    try:
+        headers = {"Authorization": f"Bearer {get_memory_api_key()}", "Content-Type": "application/json"}
+        if "openrouter" in API_BASE_URL:
+            headers["HTTP-Referer"] = EXTRA_REFERER
+            headers["X-Title"] = EXTRA_TITLE
+        async with httpx.AsyncClient(timeout=90) as client:
+            r = await client.post(API_BASE_URL, headers=headers, json={
+                "model": CACHE_SUMMARY_MODEL, "max_tokens": 900,
+                "messages": [{"role": "user", "content": prompt}]})
+            if r.status_code == 200:
+                d = r.json()
+                if "choices" in d:
+                    s = d["choices"][0]["message"]["content"].strip()
+                    return await _scrub_digest_explicit(s)
+            print(f"⚠️ 早期小结卷制失败: HTTP {r.status_code}")
+    except Exception as e:
+        print(f"⚠️ 早期小结卷制异常: {e}")
+    return ""
+
+
+@app.get("/api/summary/cap-preview")
+async def api_summary_cap_preview(n: int = 8):
+    """DRY 预览滚动摘要封顶:最老 (总段-N) 段卷成「早期小结」(留定义性大事) + 留最近 N 段详细。
+    **只读、不写缓存**——出样例 + 卷前/卷后 token 对比给阮阮过目。"""
+    sid = get_active_session_id()
+    state = await get_session_cache_state(sid) if sid else {}
+    parts = state.get("summary_parts") or []
+
+    def est(s):
+        s = s or ""
+        cjk = sum(1 for ch in s if ('㐀' <= ch <= '鿿') or ('＀' <= ch <= '￯') or ('　' <= ch <= '〿'))
+        return int(round(cjk * 0.7 + (len(s) - cjk) / 4.0))
+
+    if len(parts) <= n:
+        return {"session": sid, "note": f"当前仅 {len(parts)} 段 ≤ N={n},无需卷", "parts_now": len(parts)}
+    cut = len(parts) - n
+    old, recent = parts[:cut], parts[cut:]
+    early = await _roll_early_summary(old)
+    before = sum(est(p) for p in parts)
+    after = est(early) + sum(est(p) for p in recent)
+    return {
+        "session": sid, "n": n, "parts_before": len(parts), "old_rolled": len(old), "recent_kept": len(recent),
+        "early_summary_chars": len(early), "early_summary_sample": early,
+        "tokens_before": before, "tokens_after": after, "tokens_saved": before - after,
+        "cached_eff_per_turn_before": round(before * 0.1, 1), "cached_eff_per_turn_after": round(after * 0.1, 1),
+        "eff_saved_per_turn": round((before - after) * 0.1, 1),
+    }
+
+
 # ============================================================
 # ② L2今日浓缩（保质感；非缓存当前轮注入；后台每 N 轮刷一次）
 # ============================================================
