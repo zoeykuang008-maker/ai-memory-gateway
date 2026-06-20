@@ -1915,8 +1915,10 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         if tool_messages:
             print(f"💾 tool详情: {[{'role': m.get('role'), 'tool_call_id': m.get('tool_call_id', '?')} for m in tool_messages]}")
 
-        # 看图记忆(铁律):本轮带图 → 后台描述+存记忆(下轮可检索记得),独立于提取间隔
-        if IMAGE_ENABLED and images and not skip_conversation_log:
+        # 看图记忆(铁律):本轮带图 → 后台描述+存记忆(下轮可检索记得),独立于提取间隔。
+        # 注意:不能用 not skip_conversation_log——正常轮走 off-by-one 同步时 skip_conversation_log=True,
+        # 那样会把图片记忆也跳过(=图片不进上下文的根因)。只要本轮有图就存。
+        if IMAGE_ENABLED and images:
             asyncio.create_task(_save_image_memory_bg(session_id, images))
 
         # 1. 存储对话记录（除非明确跳过）
