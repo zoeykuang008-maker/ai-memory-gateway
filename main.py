@@ -1920,13 +1920,6 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         if tool_messages:
             print(f"💾 tool详情: {[{'role': m.get('role'), 'tool_call_id': m.get('tool_call_id', '?')} for m in tool_messages]}")
 
-        _diag_extract.clear()
-        _diag_extract.update({"called_at": datetime.now(timezone.utc).isoformat(), "phase": "start",
-                              "user_msg_len": len(user_msg or ""), "skip": skip_conversation_log,
-                              "tool": bool(tool_messages), "interval": MEMORY_EXTRACT_INTERVAL,
-                              "extract_enabled": MEMORY_EXTRACT_ENABLED, "has_context": bool(context_messages),
-                              "ctx_len": len(context_messages or []), "error": None})
-
         # 看图记忆(铁律):本轮带图 → 后台描述+存记忆(下轮可检索记得),独立于提取间隔。
         # 注意:不能用 not skip_conversation_log——正常轮走 off-by-one 同步时 skip_conversation_log=True,
         # 那样会把图片记忆也跳过(=图片不进上下文的根因)。只要本轮有图就存。
@@ -2049,9 +2042,6 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         messages_for_extraction = _msgs_text_only(messages_for_extraction)  # 多模态兜底:绝不把图 base64 喂提取/feel(否则不出碎片)
 
         new_memories = await extract_memories(messages_for_extraction, existing_memories=existing_contents)
-        _diag_extract.update({"phase": "extracted", "extracted": len(new_memories), "round": _round_counter,
-                              "msgs_for_extract": len(messages_for_extraction),
-                              "sample": (new_memories[0].get("content", "")[:50] if new_memories else "")})
 
         # ③-1 feel：同一段顺带写一句"留在你心里的感受"(单独存、不衰减；默认关到验收)
         if FEEL_ENABLED:
@@ -2139,14 +2129,8 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
             total = await get_all_memories_count()
             print(f"💾 已存 {saved} 条事实（去重跳过 {skipped_dup}，meta过滤 {len(new_memories) - len(filtered_memories)}，"
                   f"行为偏好分流 {persona_routed}，推翻旧事实 {superseded}），总计 {total} 条")
-
-        _diag_extract.update({"phase": "done", "saved": saved, "skipped_dup": skipped_dup,
-                              "persona_routed": persona_routed,
-                              "filtered": len(new_memories) - len(filtered_memories)})
     except Exception as e:
         print(f"⚠️  后台记忆处理失败: {e}")
-        import traceback
-        _diag_extract.update({"phase": "error", "error": str(e), "tb": traceback.format_exc()[-400:]})
 
 
 # ============================================================
@@ -2190,49 +2174,7 @@ async def list_models():
     }
 
 
-_diag_mm = {"last": None, "last_image": None}
-_diag_extract = {"phase": None}
-
-
-@app.get("/api/debug/last-multimodal")
-async def api_debug_last_multimodal():
-    """诊断:最近一次 /v1/chat/completions 收到的消息 content 结构(看 Kelivo 到底发没发 image 块)。只读,不改行为。"""
-    return dict(_diag_mm)
-
-
-@app.get("/api/debug/last-extract")
-async def api_debug_last_extract():
-    """诊断:最近一次后台记忆提取走到哪步/提取几条/存几条/报什么错。只读,排查发图后不出碎片。"""
-    return dict(_diag_extract)
-
-
-def _capture_multimodal(messages):
-    """记录入口收到的 content 结构(只存元数据+图 url 前缀,不存整图)。诊断用,不影响转发。"""
-    try:
-        cap = []
-        for m in messages:
-            c = m.get("content")
-            if isinstance(c, list):
-                types = {}
-                imgs = []
-                for b in c:
-                    if isinstance(b, dict):
-                        t = b.get("type", "?")
-                        types[t] = types.get(t, 0) + 1
-                        if t == "image_url":
-                            u = b.get("image_url")
-                            us = (u.get("url", "") if isinstance(u, dict) else str(u)) or ""
-                            imgs.append(us[:90])
-                cap.append({"role": m.get("role"), "kind": "list", "types": types, "img_samples": imgs})
-            else:
-                cap.append({"role": m.get("role"), "kind": "str", "len": len(c or "")})
-        img_total = sum(b["types"].get("image_url", 0) for b in cap if b.get("kind") == "list")
-        snap = {"at": datetime.now(timezone.utc).isoformat(), "image_blocks": img_total, "messages": cap[-6:]}
-        _diag_mm["last"] = snap
-        if img_total > 0:
-            _diag_mm["last_image"] = snap
-    except Exception:
-        pass
+# （诊断脚手架已移除：_diag_mm / _diag_extract / last-multimodal / last-extract / _capture_multimodal）
 
 
 @app.post("/v1/chat/completions")
@@ -2246,7 +2188,6 @@ async def chat_completions(request: Request):
 
     body = await request.json()
     messages = body.get("messages", [])
-    _capture_multimodal(messages)  # 诊断:记录入口 content 结构(只读快照)
     _turn_images = _extract_image_uris(messages) if IMAGE_ENABLED else []  # 看图记忆:本轮原图(交后台)
 
     # ---------- 检测是否应跳过对话存储 ----------
@@ -5579,29 +5520,6 @@ async def api_rollback_session(request: Request):
         return out
     except Exception as e:
         return {"error": str(e)}
-
-
-@app.post("/api/debug/test-extract")
-async def api_test_extract(request: Request):
-    """诊断:对一段样例文本真跑一遍记忆提取(不写库),看它吐不吐得出记忆 / 报不报错。
-    确认提取链路是否正常(排查发图后不出碎片)。只读。"""
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    text = (body.get("text") or "阮阮今天喝了冰咖啡，例假还没来有点焦虑；EVE止痛药含布洛芬成分。").strip()
-    msgs = _msgs_text_only([
-        {"role": "user", "content": text},
-        {"role": "assistant", "content": "嗯，我记着了。"},
-    ])
-    try:
-        existing = await get_recent_memories(limit=10)
-        ex = [{"id": r["id"], "content": r["content"]} for r in existing]
-        mems = await extract_memories(msgs, existing_memories=ex)
-        return {"ok": True, "count": len(mems), "memories": mems}
-    except Exception as e:
-        import traceback
-        return {"ok": False, "error": str(e), "tb": traceback.format_exc()[-700:]}
 
 
 @app.post("/api/dreams/regenerate")
