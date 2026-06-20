@@ -2478,7 +2478,7 @@ async def chat_completions(request: Request):
     
     if is_stream:
         return StreamingResponse(
-            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages, _sync_conv, _is_reroll),
+            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages, _sync_conv, _is_reroll, _turn_images),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
@@ -2533,7 +2533,7 @@ async def chat_completions(request: Request):
                 return JSONResponse(status_code=response.status_code, content=response.json())
 
 
-async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, sync_conv: bool = False, is_reroll: bool = False):
+async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, sync_conv: bool = False, is_reroll: bool = False, turn_images: list = None):
     """流式响应 + 捕获完整回复（原始字节透传，确保SSE格式和thinking数据完整）"""
     full_response = []
     full_reasoning = []
@@ -2653,7 +2653,7 @@ async def stream_and_capture(headers: dict, body: dict, session_id: str, user_me
             process_memories_background(session_id, user_message, assistant_msg, model,
                                         context_messages=original_messages, skip_conversation_log=(skip_conversation_log or sync_conv),
                                         tool_messages=tool_messages, assistant_tool_calls=assistant_tool_calls,
-                                        assistant_reasoning=assistant_reasoning, images=_turn_images)
+                                        assistant_reasoning=assistant_reasoning, images=turn_images)
         )
 
 
