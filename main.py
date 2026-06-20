@@ -5549,6 +5549,29 @@ async def api_rollback_session(request: Request):
         return {"error": str(e)}
 
 
+@app.post("/api/debug/test-extract")
+async def api_test_extract(request: Request):
+    """诊断:对一段样例文本真跑一遍记忆提取(不写库),看它吐不吐得出记忆 / 报不报错。
+    确认提取链路是否正常(排查发图后不出碎片)。只读。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    text = (body.get("text") or "阮阮今天喝了冰咖啡，例假还没来有点焦虑；EVE止痛药含布洛芬成分。").strip()
+    msgs = _msgs_text_only([
+        {"role": "user", "content": text},
+        {"role": "assistant", "content": "嗯，我记着了。"},
+    ])
+    try:
+        existing = await get_recent_memories(limit=10)
+        ex = [{"id": r["id"], "content": r["content"]} for r in existing]
+        mems = await extract_memories(msgs, existing_memories=ex)
+        return {"ok": True, "count": len(mems), "memories": mems}
+    except Exception as e:
+        import traceback
+        return {"ok": False, "error": str(e), "tb": traceback.format_exc()[-700:]}
+
+
 # ============================================================
 
 if __name__ == "__main__":
