@@ -1340,6 +1340,14 @@ async def update_l5_candidate(cand_id: int, status: str):
         await conn.execute("UPDATE l5_candidates SET status = $2 WHERE id = $1", cand_id, status)
 
 
+async def get_l5_candidate(cand_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, content, event_date, source_session, status, created_at, target FROM l5_candidates WHERE id = $1", cand_id)
+        return dict(row) if row else None
+
+
 async def save_persona_suggestion(content: str, source_session: str = ""):
     pool = await get_pool()
     async with pool.acquire() as conn:

@@ -36,7 +36,7 @@ from database import count_conversations_between, fetch_conversations_between, d
 from database import count_memories_between, fetch_memories_between, delete_memories_between, restore_memories
 from database import save_feel, get_recent_feels, get_all_feels, set_feel_explicit, save_image_memory
 from database import count_conversations_since, delete_conversations_since, count_memories_since, delete_memories_since
-from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate
+from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate, get_l5_candidate
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories, tag_emotions_batch, tag_explicit_batch
 
@@ -4347,21 +4347,28 @@ async def api_update_l5_candidate(cand_id: int, request: Request):
         body = {}
     action = (body.get("action") or "").strip()
     if action == "approve":
-        text = (body.get("content") or "").strip()
-        target = (body.get("target") or "l5").strip()
+        # 用候选自己存的正文/去向(不依赖前端传 content;前端只需传 id+action)；body.content 仅作可选编辑覆盖
+        cand = await get_l5_candidate(cand_id)
+        if not cand:
+            return JSONResponse(status_code=404, content={"error": "候选不存在"})
+        text = (cand.get("content") or "").strip()   # 用候选自己存的正文,不依赖前端
+        target = (cand.get("target") or body.get("target") or "l5").strip()
+        wrote = None
         if text:
             if target == "wall":
                 # 升进回忆墙(永久层);回忆墙铁律:只增、不自动
                 _today = (datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)).strftime("%Y-%m-%d")
                 _mw = {"summary": text, "title": text[:24], "body": text, "source": "milestone", "author": "system"}
                 await save_migrated_memory(text, 7, text[:24], _today, datetime.now(timezone.utc).isoformat(), _mw)
+                wrote = "wall"
             else:
                 cur = await get_gateway_config("l5Foundation", "")
                 new = ((cur or "").rstrip() + ("\n" if (cur or "").strip() else "") + "- " + text).strip()
                 await set_gateway_config("l5Foundation", new)
                 invalidate_l5_cache()
+                wrote = "l5"
         await update_l5_candidate(cand_id, "approved")
-        return {"status": "ok", "approved": cand_id, "target": target}
+        return {"status": "ok", "approved": cand_id, "target": target, "wrote": wrote, "l5_foundation": await get_l5_foundation()}
     elif action == "ignore":
         await update_l5_candidate(cand_id, "ignored")
         return {"status": "ok", "ignored": cand_id}
