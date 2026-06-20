@@ -111,6 +111,9 @@ function switchSection(name) {
     if (name === 'home') {
         loadHome();
     }
+    if (name === 'manage') {
+        loadMemories();   // 进「记忆」房每次重新拉取,避免空表/陈旧
+    }
     if (name === 'feel') {
         loadFeel();
     }
