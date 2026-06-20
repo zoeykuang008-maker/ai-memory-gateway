@@ -33,7 +33,7 @@ from database import get_decay_candidates, count_active_memories, deactivate_mem
 from database import count_explicit_memories, clear_persona_suggestions, clear_l5_candidates, get_current_mood
 from database import save_dream, get_dream, list_dreams, get_dream_dates, get_memorywall_dates
 from database import save_feel, get_recent_feels, get_all_feels, set_feel_explicit, save_image_memory
-from database import count_conversations_since, delete_conversations_since
+from database import count_conversations_since, delete_conversations_since, count_memories_since, delete_memories_since
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories, tag_emotions_batch, tag_explicit_batch
@@ -5517,20 +5517,25 @@ async def api_rollback_session(request: Request):
     keep_parts = body.get("keep_parts")
     a_start = body.get("a_start_round")
     clear_l2 = bool(body.get("clear_l2", True))
+    del_mem = bool(body.get("delete_memories", True))  # 删对话的同时删该段记忆碎片(回忆墙永不删),保持一致
     dry = bool(body.get("dry_run", True))
     if not session or not since:
         return {"error": "需要 session + before_iso(UTC)"}
     try:
         to_delete = await count_conversations_since(session, since)
+        mems_after = await count_memories_since(session, since)
         st = await get_session_cache_state(session)
         cur_parts = len(st.get("summary_parts") or [])
         out = {"session": session, "before_iso": since, "convos_after_cutoff": to_delete,
+               "memories_after_cutoff": mems_after, "delete_memories": del_mem,
                "summary_parts_now": cur_parts, "summary_parts_target": keep_parts,
                "a_start_round_now": st.get("a_start_round"), "a_start_round_target": a_start,
                "clear_l2": clear_l2, "dry_run": dry}
         if dry:
             return out
         out["convos_deleted"] = await delete_conversations_since(session, since)
+        if del_mem:
+            out["memories_deleted"] = await delete_memories_since(session, since)
         if keep_parts is not None and a_start is not None:
             parts = (st.get("summary_parts") or [])[:int(keep_parts)]
             await save_session_cache_state(session, parts, int(a_start))
@@ -5543,7 +5548,7 @@ async def api_rollback_session(request: Request):
             except Exception:
                 pass
             out["l2_cleared"] = True
-        print(f"🧹 rollback-session {session} → 删对话{out.get('convos_deleted')} 摘要裁{out.get('summary_trimmed_to')}段 L2清={clear_l2}")
+        print(f"🧹 rollback-session {session} → 删对话{out.get('convos_deleted')} 删记忆{out.get('memories_deleted')} 摘要裁{out.get('summary_trimmed_to')}段 L2清={clear_l2}")
         return out
     except Exception as e:
         return {"error": str(e)}

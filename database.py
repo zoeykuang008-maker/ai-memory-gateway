@@ -2035,6 +2035,30 @@ async def delete_conversations_since(session_id: str, since_iso: str) -> int:
             return 0
 
 
+async def count_memories_since(session_id: str, since_iso: str) -> int:
+    """统计某 session 在 since_iso(UTC)之后提取的记忆碎片数(回忆墙不算)。回滚 dry 用。"""
+    dt = _parse_utc_dt(since_iso)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return int(await conn.fetchval(
+            "SELECT COUNT(*) FROM memories WHERE source_session = $1 AND created_at > $2 AND mw_meta IS NULL",
+            session_id, dt) or 0)
+
+
+async def delete_memories_since(session_id: str, since_iso: str) -> int:
+    """删某 session 在 since_iso(UTC)之后提取的记忆碎片(随对话删除一起回滚)。**回忆墙(mw_meta)永不删**。返回删除数。"""
+    dt = _parse_utc_dt(since_iso)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            "DELETE FROM memories WHERE source_session = $1 AND created_at > $2 AND mw_meta IS NULL",
+            session_id, dt)
+        try:
+            return int(res.split()[-1])
+        except Exception:
+            return 0
+
+
 # ============================================================
 # Token 使用记录
 # ============================================================
