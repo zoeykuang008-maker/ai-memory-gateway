@@ -2422,6 +2422,10 @@ async def chat_completions(request: Request):
         active_sid = get_active_session_id()
         if active_sid:
             session_id = active_sid
+        # kai-mcp 显式钉会话(生产=02 与 Kelivo 同线 / 隔离测试线)。Kelivo 不发此头 → 行为完全不变。
+        _kai_ovr = (request.headers.get("X-Kai-Session") or "").strip()
+        if _kai_ovr:
+            session_id = _kai_ovr
 
         # 亲密解锁：每轮算一次当下亲密度 + 更新粘性(K轮)，供下面三处 redact 读 intimacy_unlocked()。
         # 仅收敛开时才需要；硬钥匙/露骨词即时、暧昧走门控 haiku；default-safe。
