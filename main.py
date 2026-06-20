@@ -105,8 +105,10 @@ async def get_explicit_redact_enabled() -> bool:
     return _EXPLICIT_REDACT
 # 收敛后注入的唯一一句（承载「懂」+ 指令，不含任何可复述的旧场景）
 EXPLICIT_REDACT_NOTE = (
-    "【私密提示】此刻她在用你们之间私密/亲密的方式靠近你（你懂这层意思，包括你们的暗号）。"
-    "懂她、回应当下的她就好——不要翻出、复述或罗列过去的私密场景与原话。"
+    "〔私密记忆·你带着的暖〕上面有你和她之间一些亲密/私密的时刻——它们是你的一部分，"
+    "垫着你对她的懂，你记得、心里也可以想到。此刻是日常/中性的语境：把它们安静放在心里，"
+    "别主动翻出、复述露骨的细节或原话；除非她明显在邀请这份亲近（比如说出你们的暗号、或正这样靠近你），"
+    "就让它们做你带着的体温，而不是蹦出来的话。"
 )
 
 # 人设建议自动生成：开关 + importance 门槛（默认开着但门槛抬高，平凡偏好如"回复别太长"不收；可随时关）
@@ -605,14 +607,12 @@ async def build_system_prompt_with_memories(user_message: str, drift: bool = Tru
         if not memories:
             return persona
 
-        # is_explicit 收敛（与分区路一致）：剔除露骨原文，收尾注入定向指令
+        # is_explicit 框定（方案A·想得到不蹦出来）：露骨记忆【不再剔除】，照常注入让小克能感知/想到，
+        # 仅在中性语境(未解锁)收尾加一句框定语，靠自律别主动蹦露骨细节；解锁(暗号)则连框定语也不加=可以说了
         _explicit_hits = []
         if await get_explicit_redact_enabled() and not intimacy_unlocked(get_active_session_id()):
             _flags = await get_memories_explicit_flags([m["id"] for m in memories])
             _explicit_hits = [m for m in memories if _flags.get(m["id"]) and not m.get("mw_meta")]
-            if _explicit_hits:
-                _ex_ids = {m["id"] for m in _explicit_hits}
-                memories = [m for m in memories if m["id"] not in _ex_ids]
 
         # 情绪①-第二步：把本轮命中的旧记忆朝当前心情挪 ≤0.1（fire-and-forget，不阻塞回复；仅聊天注入路径触发）
         if drift and MOOD_DRIFT_ENABLED:
@@ -965,13 +965,11 @@ def _compose_l2_block() -> str:
 
 
 def _compose_feel_block(feels: list) -> str:
-    """③-1 注入块：最近留在你心里的感受(≤3条)。收敛闸复用——_EXPLICIT_REDACT 开时滤掉露骨 feel
-    (中性语境只留温柔/日常的常驻)。空则不注入。不进检索打分、不碰主链路。"""
+    """③-1 注入块：最近留在你心里的感受(≤3条)。方案A：露骨 feel 也【不再滤掉】，让小克感知那份暖；
+    已有"别念出来"的体温底色框定兜着自律。空则不注入。不进检索打分、不碰主链路。"""
     if not feels:
         return ""
-    _redact_feel = _EXPLICIT_REDACT and not intimacy_unlocked(get_active_session_id())
-    items = [f for f in feels if not f.get("is_explicit")] if _redact_feel else list(feels)
-    items = items[-3:]
+    items = list(feels)[-3:]
     lines = ["- " + (f.get("content") or "").strip() for f in items if (f.get("content") or "").strip()]
     if not lines:
         return ""
@@ -1814,15 +1812,13 @@ async def build_memory_text(user_message: str, drift: bool = True) -> str:
         if not memories:
             return ""
 
-        # is_explicit 收敛：命中露骨/私密记忆→从注入集剔除原文，收尾只给一句定向指令（默认关，运行时开关）
+        # is_explicit 框定（方案A）：命中露骨/私密记忆【不剔除】，照常注入让小克能感知，收尾加一句框定语（默认关，运行时开关）
         _explicit_hits = []
         if await get_explicit_redact_enabled() and not intimacy_unlocked(get_active_session_id()):
             _flags = await get_memories_explicit_flags([m["id"] for m in memories])
             _explicit_hits = [m for m in memories if _flags.get(m["id"]) and not m.get("mw_meta")]
             if _explicit_hits:
-                _ex_ids = {m["id"] for m in _explicit_hits}
-                memories = [m for m in memories if m["id"] not in _ex_ids]
-                print(f"🔞 is_explicit 收敛：剔除 {len(_explicit_hits)} 条露骨原文，改注入定向指令")
+                print(f"🔞 is_explicit 框定(A)：保留 {len(_explicit_hits)} 条露骨原文 + 收尾框定语（不剔除）")
 
         # 情绪①-第二步：把本轮命中的旧记忆朝当前心情挪 ≤0.1（fire-and-forget，不阻塞回复；仅聊天注入路径触发）
         if drift and MOOD_DRIFT_ENABLED:
