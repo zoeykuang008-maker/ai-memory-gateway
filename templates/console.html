@@ -173,6 +173,7 @@ input[type=range]::-moz-range-thumb{width:13px;height:13px;border:none;border-ra
     <div class="panel">
       <div class="panel-h"><span class="en">SURFACING</span><span class="cn">叙事 · 浮现</span><i class="ti ti-quote"></i></div>
       <div class="row"><div><div class="label">保质感摘要</div><div class="hint" id="h-summary_quality"></div></div><div class="ctl"><label class="tg"><input type="checkbox" id="tg-summary_quality"><span class="track"></span><span class="knob"></span></label><button class="btn sm" data-prev="summary">预览▸</button></div></div>
+      <div class="row"><div><div class="label">滚动摘要封顶 <span class="hint">早期小结+最近N段·不再无限涨</span></div><div class="hint" id="h-summary_cap"></div></div><div class="ctl"><label class="tg"><input type="checkbox" id="tg-summary_cap"><span class="track"></span><span class="knob"></span></label></div></div>
       <div class="drawer" id="dw-summary"><div class="drawer-body">点「预览」看新摘要样例(只读)…</div></div>
       <div class="row"><div><div class="label">主动浮现</div><div class="hint" id="h-proactive"></div></div><div class="ctl"><label class="tg"><input type="checkbox" id="tg-proactive"><span class="track"></span><span class="knob"></span></label><button class="btn sm" data-prev="proactive">预览▸</button></div></div>
       <div class="drawer" id="dw-proactive"><div class="drawer-body">点「预览」看开场白样例(6 次 haiku,稍慢)…</div></div>
@@ -275,7 +276,7 @@ function setSlider(key){
 
 function render(){
   paintStatus();
-  ['feel','redact','summary_quality','proactive','decay','mood_drift','drift_skip_mw','persona','extract','l2_today','dream','dream_retrievable','image']
+  ['feel','redact','summary_quality','summary_cap','proactive','decay','mood_drift','drift_skip_mw','persona','extract','l2_today','dream','dream_retrievable','image']
     .forEach(k=>setToggle(k,k));
   Object.keys(DATA.numbers).forEach(setSlider);
   // counts
@@ -386,7 +387,7 @@ async function runMaint(kind){
 
 // ---- 绑定 ----
 function bind(){
-  const tgmap={mood_drift:'mood_drift',feel:'feel',drift_skip_mw:'drift_skip_mw',redact:'redact',extract:'extract',summary_quality:'summary_quality',proactive:'proactive',decay:'decay',dream:'dream',dream_retrievable:'dream_retrievable',l2_today:'l2_today',persona:'persona',image:'image'};
+  const tgmap={mood_drift:'mood_drift',feel:'feel',drift_skip_mw:'drift_skip_mw',redact:'redact',extract:'extract',summary_quality:'summary_quality',summary_cap:'summary_cap',proactive:'proactive',decay:'decay',dream:'dream',dream_retrievable:'dream_retrievable',l2_today:'l2_today',persona:'persona',image:'image'};
   Object.keys(tgmap).forEach(id=>{ const el=document.getElementById('tg-'+id); if(el) el.addEventListener('change',()=>onToggle(id,tgmap[id])); });
   document.querySelectorAll('input[data-num]').forEach(el=>{
     el.addEventListener('input',()=>{ const v=document.getElementById('val-'+el.dataset.num); if(v) v.textContent=fmt(el.dataset.num,el.value); });

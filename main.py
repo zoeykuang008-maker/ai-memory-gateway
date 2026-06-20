@@ -391,6 +391,7 @@ async def lifespan(app: FastAPI):
                         "MEMORY_EXTRACT_ENABLED": lambda v: _parse_bool(v),
                         "L2_TODAY_ENABLED": lambda v: _parse_bool(v), "L2_REFRESH_N": int,
                         "DREAM_ENABLED": lambda v: _parse_bool(v), "DREAM_RETRIEVABLE": lambda v: _parse_bool(v),
+                        "SUMMARY_CAP_ENABLED": lambda v: _parse_bool(v), "SUMMARY_CAP_N": int, "SUMMARY_CAP_B": int,
                         "PROACTIVE_GAP_HOURS": float,
                     }
                     _RESTORE_DB = {
@@ -5503,6 +5504,9 @@ async def save_settings(request: Request):
             "L2_REFRESH_N":          int,
             "DREAM_ENABLED":         lambda v: _parse_bool(v),
             "DREAM_RETRIEVABLE":     lambda v: _parse_bool(v),
+            "SUMMARY_CAP_ENABLED":   lambda v: _parse_bool(v),
+            "SUMMARY_CAP_N":         int,
+            "SUMMARY_CAP_B":         int,
             "PROACTIVE_GAP_HOURS":   float,
         }
 
@@ -5638,6 +5642,7 @@ async def api_console():
         "l2_today":          {"on": L2_TODAY_ENABLED,        "default": True,  "key": "L2_TODAY_ENABLED"},
         "dream":             {"on": DREAM_ENABLED,           "default": True,  "key": "DREAM_ENABLED"},
         "dream_retrievable": {"on": DREAM_RETRIEVABLE,       "default": False, "key": "DREAM_RETRIEVABLE"},
+        "summary_cap":       {"on": SUMMARY_CAP_ENABLED,     "default": False, "key": "SUMMARY_CAP_ENABLED"},
     }
     numbers = {
         "MAX_MEMORIES_INJECT":     {"value": MAX_MEMORIES_INJECT, "default": 15, "via": "settings", **_rng("MAX_MEMORIES_INJECT")},
@@ -5650,6 +5655,8 @@ async def api_console():
         "MOOD_DRIFT_DAILY_CAP":    {"value": MOOD_DRIFT_DAILY_CAP, "default": 3, "via": "settings", "sensitive": True, **_rng("MOOD_DRIFT_DAILY_CAP")},
         "MOOD_RECENT_N":           {"value": MOOD_RECENT_N, "default": 30, "via": "settings", "sensitive": True, **_rng("MOOD_RECENT_N")},
         "L2_REFRESH_N":            {"value": L2_REFRESH_N, "default": 5, "via": "settings", **_rng("L2_REFRESH_N")},
+        "SUMMARY_CAP_N":           {"value": SUMMARY_CAP_N, "default": 8, "via": "settings", "min": 4, "max": 30},
+        "SUMMARY_CAP_B":           {"value": SUMMARY_CAP_B, "default": 4, "via": "settings", "min": 1, "max": 15},
         # 衰减阈值:走 /api/memories/decay/toggle
         "decay_age_days":          {"value": DECAY_AGE_DAYS, "default": 7, "via": "decay", "min": 1, "max": 90},
         "decay_imp_max":           {"value": DECAY_IMP_MAX, "default": 4, "via": "decay", "min": 1, "max": 10},
