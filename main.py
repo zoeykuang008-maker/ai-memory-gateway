@@ -5614,22 +5614,49 @@ async def api_dreams_regenerate(request: Request):
     dates = body.get("dates") or []
     dry = bool(body.get("dry_run", True))
     sid = get_active_session_id()
+    _today = (datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)).date()
+    _yest_s = str(_today - timedelta(days=1))
     out = []
     for d in dates:
         try:
             dream = await generate_dream(sid, str(d))
             if dream and (dream.get("diary") or dream.get("card_title")):
+                retr = False
                 if not dry:
                     await save_dream(str(d), dream.get("diary", ""), dream.get("summary", ""),
                                      dream.get("card_title", ""), dream.get("card_body", ""), DREAM_MODEL)
-                out.append({"date": str(d), "ok": True, "saved": (not dry),
+                    # 昨日桥：补的是昨天就把桥换成这篇梦的新当日总结（小克视角）
+                    if str(d) == _yest_s and (dream.get("summary") or "").strip():
+                        _l2_state["bridge"] = dream["summary"].strip()
+                        try:
+                            await set_gateway_config("l2_bridge", _l2_state["bridge"])
+                        except Exception:
+                            pass
+                    # 可检索：写一条回忆墙条目，让小克能"读到这篇梦"（先停用该日旧 dream 条目，避免重复）
+                    if DREAM_RETRIEVABLE:
+                        try:
+                            for r in await list_memorywall(include_inactive=True):
+                                mm = r.get("mw_meta") or {}
+                                if isinstance(mm, str):
+                                    try: mm = json.loads(mm)
+                                    except Exception: mm = {}
+                                if mm.get("source") == "dream" and str(r.get("event_date")) == str(d):
+                                    await set_memory_active(r["id"], False)
+                            _mw = {"summary": dream.get("summary", ""), "title": dream.get("card_title", ""),
+                                   "body": dream.get("diary", ""), "source": "dream"}
+                            await save_migrated_memory(dream.get("diary", "")[:2000], 6, dream.get("card_title", ""),
+                                                       str(d), None, json.dumps(_mw, ensure_ascii=False))
+                            retr = True
+                        except Exception as _me:
+                            print(f"⚠️ 梦→回忆墙写入失败 {d}: {_me}")
+                out.append({"date": str(d), "ok": True, "saved": (not dry), "retrievable": retr,
                             "card_title": dream.get("card_title", ""), "summary": dream.get("summary", ""),
                             "diary": (dream.get("diary", "") or "")[:700]})
             else:
                 out.append({"date": str(d), "ok": False, "reason": "无对话或生成失败"})
         except Exception as e:
             out.append({"date": str(d), "ok": False, "error": str(e)})
-    return {"dry_run": dry, "results": out}
+    return {"dry_run": dry, "dream_retrievable": DREAM_RETRIEVABLE, "results": out}
 
 
 # ============================================================
