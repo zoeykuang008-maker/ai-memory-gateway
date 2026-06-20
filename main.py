@@ -3990,7 +3990,7 @@ async def api_migrate_memory_wall(request: Request):
         body = await request.json()
     except Exception:
         body = {}
-    source = (body.get("source_url") or "http://43.156.151.40:3000").rstrip("/")
+    source = (body.get("source_url") or os.getenv("MEMORYWALL_SOURCE_URL", "http://localhost:3000")).rstrip("/")
     password = body.get("password") or ""
     dry_run = bool(body.get("dry_run", False))
     summary_threshold = int(body.get("summary_threshold", 400))
