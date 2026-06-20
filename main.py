@@ -5621,7 +5621,11 @@ async def api_selfserve_delete(request: Request):
         except Exception as e:
             out["summary_error"] = str(e)
         try:
-            await refresh_l2(session); out["l2_rebuilt"] = True
+            if session == get_active_session_id():
+                await refresh_l2(session); out["l2_rebuilt"] = True
+            else:
+                out["l2_rebuilt"] = False
+                out["l2_note"] = "非活跃会话:跳过L2重建(L2是全局态,避免污染活跃线)"
         except Exception as e:
             out["l2_error"] = str(e)
         if rebuild_dream:
