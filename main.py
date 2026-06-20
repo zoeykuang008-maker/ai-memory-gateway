@@ -31,7 +31,7 @@ from database import list_memorywall, get_memorywall_one, update_memorywall, get
 from database import get_memories_explicit_flags, set_memory_explicit, get_explicit_backfill_candidates, get_high_arousal_memories
 from database import get_decay_candidates, count_active_memories, deactivate_memories, archive_decayed_memories, reactivate_decayed_memories
 from database import count_explicit_memories, clear_persona_suggestions, clear_l5_candidates, get_current_mood
-from database import save_dream, get_dream, list_dreams, get_dream_dates, get_memorywall_dates
+from database import save_dream, get_dream, list_dreams, get_dream_dates, get_memorywall_dates, delete_dream_memories
 from database import save_feel, get_recent_feels, get_all_feels, set_feel_explicit, save_image_memory
 from database import count_conversations_since, delete_conversations_since, count_memories_since, delete_memories_since
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate
@@ -1113,10 +1113,12 @@ async def maybe_run_dreams(session_id: str, dry_run: bool = False, only_dates: l
                         pass
                 if DREAM_RETRIEVABLE:
                     try:
+                        await delete_dream_memories(d)  # 去重:删该日旧 dream 条目
                         _mw = {"summary": dr.get("summary", ""), "title": dr.get("card_title", ""),
                                "body": dr.get("diary", ""), "source": "dream"}
+                        # mw_meta 传 dict（内部会 json.dumps，别双重编码）；created_at 给真实时间戳
                         await save_migrated_memory(dr.get("diary", "")[:2000], 6, dr.get("card_title", ""),
-                                                   d, None, json.dumps(_mw, ensure_ascii=False))
+                                                   d, datetime.now(timezone.utc).isoformat(), _mw)
                     except Exception as _me:
                         print(f"⚠️ 梦→回忆墙写入失败 {d}: {_me}")
             out.append({"date": d, "status": "ok", "diary_len": len(dr.get("diary", "")),
@@ -5635,17 +5637,12 @@ async def api_dreams_regenerate(request: Request):
                     # 可检索：写一条回忆墙条目，让小克能"读到这篇梦"（先停用该日旧 dream 条目，避免重复）
                     if DREAM_RETRIEVABLE:
                         try:
-                            for r in await list_memorywall(include_inactive=True):
-                                mm = r.get("mw_meta") or {}
-                                if isinstance(mm, str):
-                                    try: mm = json.loads(mm)
-                                    except Exception: mm = {}
-                                if mm.get("source") == "dream" and str(r.get("event_date")) == str(d):
-                                    await set_memory_active(r["id"], False)
+                            await delete_dream_memories(str(d))  # 去重:删该日旧 dream 条目(含历史双重编码的坏条目)
                             _mw = {"summary": dream.get("summary", ""), "title": dream.get("card_title", ""),
                                    "body": dream.get("diary", ""), "source": "dream"}
+                            # mw_meta 传 dict（save_migrated_memory 内部会 json.dumps，别再编码）；created_at 给真实时间戳
                             await save_migrated_memory(dream.get("diary", "")[:2000], 6, dream.get("card_title", ""),
-                                                       str(d), None, json.dumps(_mw, ensure_ascii=False))
+                                                       str(d), datetime.now(timezone.utc).isoformat(), _mw)
                             retr = True
                         except Exception as _me:
                             print(f"⚠️ 梦→回忆墙写入失败 {d}: {_me}")

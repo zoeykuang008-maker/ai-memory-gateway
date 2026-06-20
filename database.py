@@ -1182,13 +1182,32 @@ async def update_mw_meta(memory_id: int, mw_meta: dict):
 def _row_to_mw(row):
     d = dict(row)
     mm = d.get('mw_meta')
-    if isinstance(mm, str):
-        try:
-            mm = json.loads(mm)
-        except Exception:
-            mm = {}
-    d['mw_meta'] = mm or {}
+    for _ in range(2):  # 容错:mw_meta 可能是 dict / JSON字符串 / 历史上被双重编码的字符串
+        if isinstance(mm, str):
+            try:
+                mm = json.loads(mm)
+            except Exception:
+                mm = {}
+        else:
+            break
+    d['mw_meta'] = mm if isinstance(mm, dict) else {}
     return d
+
+
+async def delete_dream_memories(event_date) -> int:
+    """删除某天的「梦→回忆墙」可检索条目(source=dream，含历史上 mw_meta 被双重编码成字符串的坏条目)，
+    用于重生成前去重。**只删 dream 条目，绝不碰其它回忆墙。**"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        r = await conn.execute(
+            "DELETE FROM memories WHERE source_session='memory_wall' AND event_date = $1::text::date "
+            "AND (mw_meta->>'source' = 'dream' OR jsonb_typeof(mw_meta) = 'string')",
+            str(event_date)[:10],
+        )
+    try:
+        return int(str(r).split()[-1])
+    except Exception:
+        return 0
 
 
 async def get_memory_photos(memory_id: int):
