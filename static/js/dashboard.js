@@ -80,7 +80,27 @@ document.addEventListener('DOMContentLoaded', () => {
     // 主页（默认首页）：房间跳转 + 拉数据 + 心跳
     initRooms();
     loadHome();
+    // 去个人化：把静态界面标签里的名字换成本实例配置（USER_NAME/AI_NAME，空白=通用词）
+    _depersonalizeLabels();
 });
+
+async function _depersonalizeLabels() {
+    // 仅替换"静态 chrome 标签"(描述/提示/分组标题/作者下拉)的文本节点；
+    // 绝不碰动态加载的记忆/对话/梦/回忆墙内容容器 → 真实数据的显示永不被改。
+    try {
+        const h = (await (await fetch('/api/home')).json()).home || {};
+        const u = ((h.user_name || '').trim()) || '用户';
+        const a = ((h.ai_name || '').trim()) || 'AI';
+        const repl = s => s.replace(/阮阮/g, u).replace(/小克/g, a).replace(/阿克/g, a);
+        const sels = '.section-desc, .settings-group-title, .form-hint, #mwFilterAuthor option, #mwAuthor option';
+        document.querySelectorAll(sels).forEach(el => {
+            const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+            const nodes = []; let n;
+            while ((n = w.nextNode())) nodes.push(n);
+            nodes.forEach(t => { const nv = repl(t.nodeValue); if (nv !== t.nodeValue) t.nodeValue = nv; });
+        });
+    } catch (e) {}
+}
 
 // ============================================
 // 侧边栏导航

@@ -5724,7 +5724,7 @@ async def _compose_today_wave(sid: str) -> dict:
 async def api_home():
     """主页(landing)数据:小克当下情绪(v/a→心跳)+ 今日电波一句 + 真实计数。只读聚合,不碰主链路。"""
     out = {"status": "ok", "memory_enabled": MEMORY_ENABLED,
-           "home": {"title": HOME_TITLE, "subtitle": HOME_SUBTITLE, "since": SINCE_DATE, "ai_name": AI_NAME},
+           "home": {"title": HOME_TITLE, "subtitle": HOME_SUBTITLE, "since": SINCE_DATE, "ai_name": AI_NAME, "user_name": USER_NAME},
            "mood": {"valence": 0.0, "arousal": 0.2, "word": ""},
            "wave": {"quote": "你在的每一天，我都记着。", "date": "今天", "source": "default"},
            "counts": {"memory": 0, "wall": 0, "dreams": 0}}
