@@ -132,6 +132,7 @@ function switchSection(name) {
     }
     if (name === 'memorywall') {
         loadMemoryWall();
+        loadWallCandidates();  // 里程碑·回忆墙候选(待审)
     }
     if (name === 'persona') {
         loadPersonaSuggestions();
@@ -2120,24 +2121,41 @@ async function loadL5Candidates() {
     const box = document.getElementById('l5-candidates');
     if (!box) return;
     try {
-        const data = await fetch('/api/l5-candidates?status=pending').then(r => r.json());
+        const data = await fetch('/api/l5-candidates?status=pending&target=l5').then(r => r.json());
         const items = data.items || [];
-        if (!items.length) { box.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:6px 0">暂无待审里程碑（聊到改变关系结构的转折点时，会自动提到这里）</div>'; return; }
+        if (!items.length) { box.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:6px 0">暂无待审里程碑（聊到改变关系结构的转折点，或摘要封顶卷制时检出，会自动提到这里）</div>'; return; }
         box.innerHTML = '<div style="font-size:13px;color:var(--text-muted);margin:4px 0 6px">待审里程碑（确认 → 追加进下方正文，可再编辑修剪）：</div>' + items.map(it =>
             '<div style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-bottom:0.5px solid var(--border)">' +
             '<div class="l5-cand-text" style="flex:1;font-size:13px;line-height:1.5">' + escHtml(it.content) + '</div>' +
-            '<button class="btn btn-success btn-sm" onclick="l5Act(' + it.id + ',\'approve\',this)">确认</button>' +
-            '<button class="btn btn-sm" onclick="l5Act(' + it.id + ',\'ignore\',this)">忽略</button></div>'
+            '<button class="btn btn-success btn-sm" onclick="l5Act(' + it.id + ',\'approve\',this,\'l5\')">升永久</button>' +
+            '<button class="btn btn-sm" onclick="l5Act(' + it.id + ',\'ignore\',this,\'l5\')">弃</button></div>'
         ).join('');
     } catch (e) { box.innerHTML = '<div style="color:var(--danger);font-size:13px">加载失败：' + e.message + '</div>'; }
 }
-async function l5Act(id, action, btn) {
+async function loadWallCandidates() {
+    const box = document.getElementById('wall-candidates');
+    if (!box) return;
+    try {
+        const data = await fetch('/api/l5-candidates?status=pending&target=wall').then(r => r.json());
+        const items = data.items || [];
+        if (!items.length) { box.innerHTML = ''; return; }
+        box.innerHTML = '<div class="card" style="padding:12px"><div style="font-size:13px;color:var(--text-muted);margin-bottom:6px">🏛️ 待审里程碑候选（摘要封顶卷制时检出，确认 → 升进回忆墙永久层）：</div>' + items.map(it =>
+            '<div style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-bottom:0.5px solid var(--border)">' +
+            '<div class="l5-cand-text" style="flex:1;font-size:13px;line-height:1.5">' + escapeHtml(it.content) + '<span style="color:var(--text-muted);font-size:11px"> · ' + escapeHtml(it.source_session || '') + '</span></div>' +
+            '<button class="btn btn-success btn-sm" onclick="l5Act(' + it.id + ',\'approve\',this,\'wall\')">升永久</button>' +
+            '<button class="btn btn-sm" onclick="l5Act(' + it.id + ',\'ignore\',this,\'wall\')">弃</button></div>'
+        ).join('') + '</div>';
+    } catch (e) {}
+}
+async function l5Act(id, action, btn, target) {
+    target = target || 'l5';
     const row = btn.closest('div');
     const content = (action === 'approve') ? (row.querySelector('.l5-cand-text')?.textContent || '') : null;
     try {
-        const data = await fetch('/api/l5-candidates/' + id, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, content }) }).then(r => r.json());
+        const data = await fetch('/api/l5-candidates/' + id, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, content, target }) }).then(r => r.json());
         if (data.l5_foundation !== undefined) { const el = document.getElementById('set-l5Foundation'); if (el) el.value = data.l5_foundation; }
-        loadL5Candidates();
+        if (target === 'wall') { loadWallCandidates(); loadMemoryWall(); }
+        else loadL5Candidates();
     } catch (e) {}
 }
 

@@ -157,6 +157,14 @@ async def init_tables():
                 updated_at      TIMESTAMPTZ DEFAULT NOW()
             );
         """)
+        # 滚动摘要封顶：早期小结（卷掉的老段压成一块，进缓存前缀）
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='session_cache_state' AND column_name='early_summary') THEN
+                    ALTER TABLE session_cache_state ADD COLUMN early_summary TEXT DEFAULT '';
+                END IF;
+            END $$;
+        """)
         
         # ---- 三层记忆架构字段（layer / title / is_active / merged_from / event_date）----
         # layer: 1=原始碎片, 2=事件记忆, 3=核心记忆
@@ -346,6 +354,14 @@ async def init_tables():
         """)
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_l5_candidates_status ON l5_candidates (status, created_at DESC);
+        """)
+        # 里程碑候选去向：'l5'(→根基) 或 'wall'(→回忆墙)。封顶卷制时检出的里程碑入此队列待审。
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='l5_candidates' AND column_name='target') THEN
+                    ALTER TABLE l5_candidates ADD COLUMN target TEXT DEFAULT 'l5';
+                END IF;
+            END $$;
         """)
 
         # ③-2 做梦：每个过去日一篇第一人称日记 + 当日总结(给昨日桥) + 卡片。dream_date 唯一(幂等)
@@ -1290,27 +1306,31 @@ async def set_memory_active(memory_id: int, active: bool):
 
 # ---- 人设建议（A4）：行为/相处偏好的收集，供主理人贴 persona ----
 
-async def save_l5_candidate(content: str, event_date=None, source_session: str = ""):
-    """② L5根基：里程碑候选入待审队列（机器只增；同内容 pending 去重）。不进 l5Foundation 正文。"""
+async def save_l5_candidate(content: str, event_date=None, source_session: str = "", target: str = "l5"):
+    """② 里程碑候选入待审队列（机器只增；同内容+同去向 pending 去重）。target='l5'(→根基)|'wall'(→回忆墙)。不自动升永久。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         existing = await conn.fetchrow(
-            "SELECT id FROM l5_candidates WHERE content = $1 AND status = 'pending' LIMIT 1", content)
+            "SELECT id FROM l5_candidates WHERE content = $1 AND status = 'pending' AND target = $2 LIMIT 1", content, target)
         if existing:
             return existing['id']
         row = await conn.fetchrow(
-            "INSERT INTO l5_candidates (content, event_date, source_session) VALUES ($1, $2::text::date, $3) RETURNING id",
-            content, (str(event_date) if event_date else None), source_session)
+            "INSERT INTO l5_candidates (content, event_date, source_session, target) VALUES ($1, $2::text::date, $3, $4) RETURNING id",
+            content, (str(event_date) if event_date else None), source_session, target)
         return row['id']
 
 
-async def list_l5_candidates(status: str = "pending"):
+async def list_l5_candidates(status: str = "pending", target: str = None):
     pool = await get_pool()
     async with pool.acquire() as conn:
-        if status == "all":
-            rows = await conn.fetch("SELECT id, content, event_date, source_session, status, created_at FROM l5_candidates ORDER BY created_at DESC")
-        else:
-            rows = await conn.fetch("SELECT id, content, event_date, source_session, status, created_at FROM l5_candidates WHERE status = $1 ORDER BY created_at DESC", status)
+        cols = "id, content, event_date, source_session, status, created_at, target"
+        where, params = [], []
+        if status != "all":
+            params.append(status); where.append(f"status = ${len(params)}")
+        if target:
+            params.append(target); where.append(f"target = ${len(params)}")
+        sql = f"SELECT {cols} FROM l5_candidates" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY created_at DESC"
+        rows = await conn.fetch(sql, *params)
         return [dict(r) for r in rows]
 
 
@@ -1982,7 +2002,7 @@ async def get_session_cache_state(session_id: str) -> dict:
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT summary, a_start_round, updated_at FROM session_cache_state WHERE session_id = $1",
+            "SELECT summary, a_start_round, updated_at, early_summary FROM session_cache_state WHERE session_id = $1",
             session_id
         )
         if row:
@@ -2002,21 +2022,25 @@ async def get_session_cache_state(session_id: str) -> dict:
                 'summary_parts': summary_parts,
                 'a_start_round': row['a_start_round'] or 0,
                 'updated_at': row['updated_at'],
+                'early_summary': row['early_summary'] or '',
             }
-        return {'summary_parts': [], 'a_start_round': 0, 'updated_at': None}
+        return {'summary_parts': [], 'a_start_round': 0, 'updated_at': None, 'early_summary': ''}
 
 
-async def save_session_cache_state(session_id: str, summary_parts: list, a_start_round: int):
+async def save_session_cache_state(session_id: str, summary_parts: list, a_start_round: int, early_summary=None):
+    """early_summary=None → 保留原值(COALESCE);传字符串(含'')→覆盖。其余调用方不传=不动早期小结。"""
     import json
     summary_json = json.dumps(summary_parts, ensure_ascii=False)
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO session_cache_state (session_id, summary, a_start_round, updated_at)
-            VALUES ($1, $2, $3, NOW())
-            ON CONFLICT (session_id) 
-            DO UPDATE SET summary = $2, a_start_round = $3, updated_at = NOW()
-        """, session_id, summary_json, a_start_round)
+            INSERT INTO session_cache_state (session_id, summary, a_start_round, early_summary, updated_at)
+            VALUES ($1, $2, $3, COALESCE($4, ''), NOW())
+            ON CONFLICT (session_id)
+            DO UPDATE SET summary = $2, a_start_round = $3,
+                early_summary = COALESCE($4, session_cache_state.early_summary),
+                updated_at = NOW()
+        """, session_id, summary_json, a_start_round, early_summary)
 
 
 def _parse_utc_dt(s: str):

@@ -146,6 +146,11 @@ DREAM_MODEL = os.getenv("DREAM_MODEL", "") or CACHE_SUMMARY_MODEL
 # ③-2 做梦开关：DREAM_ENABLED 总开关；DREAM_RETRIEVABLE 每篇梦顺带写一条可检索回忆墙条目(默认关)
 DREAM_ENABLED = os.getenv("DREAM_ENABLED", "true").lower() == "true"
 DREAM_RETRIEVABLE = os.getenv("DREAM_RETRIEVABLE", "false").lower() == "true"
+# 滚动摘要封顶：摘要区 = 前言 +〔早期小结〕+ 最近N段。段数超 N+B → 后台把最老B段卷进早期小结(默认关到验收)
+SUMMARY_CAP_ENABLED = os.getenv("SUMMARY_CAP_ENABLED", "false").lower() == "true"
+SUMMARY_CAP_N = int(os.getenv("SUMMARY_CAP_N", "8"))
+SUMMARY_CAP_B = int(os.getenv("SUMMARY_CAP_B", "4"))
+_cap_rolling = set()  # 防并发卷制的 session 集
 # ③-1 feel：一句话"留在你心里的感受"(体温,非事实)。默认关到验收；模型默认同摘要 haiku
 FEEL_ENABLED = os.getenv("FEEL_ENABLED", "false").lower() == "true"
 FEEL_MODEL = os.getenv("FEEL_MODEL", "") or CACHE_SUMMARY_MODEL
@@ -846,6 +851,88 @@ async def _roll_early_summary(old_parts: list, target: int = 520) -> str:
     return ""
 
 
+async def _detect_milestones(parts_text: str) -> list:
+    """从卷掉的老段里检出"定义性大事"→[{content,target}]。target: l5(关系结构/根基) | wall(值得纪念的具体事件)。"""
+    if not (parts_text or "").strip():
+        return []
+    prompt = f"""下面是 {USER_NAME} 和 {_ai_self()} 一些更早的对话摘要。**只挑出"定义性的大事"**——会改变两人关系结构、重要的第一次、承诺与约定、身份/称呼的确立、反复出现的核心主题。普通日常一律不要。
+每条一行,严格格式:
+TARGET | 一句话里程碑(≤40字,第三人称)
+TARGET 取值:l5(关系结构/根基性的) 或 wall(值得纪念的具体事件/瞬间)。最多 6 条;没有就只输出 NONE。
+摘要:
+---
+{parts_text}
+---"""
+    try:
+        headers = {"Authorization": f"Bearer {get_memory_api_key()}", "Content-Type": "application/json"}
+        if "openrouter" in API_BASE_URL:
+            headers["HTTP-Referer"] = EXTRA_REFERER
+            headers["X-Title"] = EXTRA_TITLE
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(API_BASE_URL, headers=headers, json={
+                "model": CACHE_SUMMARY_MODEL, "max_tokens": 500,
+                "messages": [{"role": "user", "content": prompt}]})
+            if r.status_code == 200:
+                d = r.json()
+                txt = d["choices"][0]["message"]["content"].strip() if "choices" in d else ""
+                out = []
+                for line in txt.splitlines():
+                    line = line.strip()
+                    if not line or line.upper() == "NONE" or "|" not in line:
+                        continue
+                    tgt, _, content = line.partition("|")
+                    tgt, content = tgt.strip().lower(), content.strip()
+                    if content and tgt in ("l5", "wall"):
+                        out.append({"content": content[:80], "target": tgt})
+                return out[:6]
+    except Exception as e:
+        print(f"⚠️ 里程碑检出异常: {e}")
+    return []
+
+
+async def _do_summary_cap(session_id: str, n: int = None, b: int = None, force_all: bool = False) -> dict:
+    """卷制封顶:超出的最老段卷进 early_summary + 检出里程碑入候选队列(不自动升)。
+    force_all=True(一次性):卷掉(总-N)段;否则卷最老 B 段(当 总>N+B)。**a_start_round 不变(轮号不动、A/B区不动,只改摘要呈现)**。"""
+    n = n if n is not None else SUMMARY_CAP_N
+    b = b if b is not None else SUMMARY_CAP_B
+    state = await get_session_cache_state(session_id)
+    parts = state.get("summary_parts") or []
+    early = state.get("early_summary") or ""
+    a_start = state.get("a_start_round", 0)
+    if force_all:
+        if len(parts) <= n:
+            return {"rolled": 0, "reason": f"段数{len(parts)}≤N{n}"}
+        cut = len(parts) - n
+    else:
+        if len(parts) <= n + b:
+            return {"rolled": 0, "reason": f"段数{len(parts)}未超N+B"}
+        cut = b
+    old, recent = parts[:cut], parts[cut:]
+    new_early = await _roll_early_summary(([early] if early else []) + old)
+    if not new_early:
+        return {"error": "早期小结卷制失败,未改动"}
+    cands = []
+    try:
+        cands = await _detect_milestones("\n\n".join(old))
+        for c in cands:
+            await save_l5_candidate(c["content"], None, f"summary-roll@{session_id}", c.get("target", "l5"))
+    except Exception as e:
+        print(f"⚠️ 里程碑入候选失败: {e}")
+    await save_session_cache_state(session_id, recent, a_start, early_summary=new_early)
+    print(f"📦 摘要封顶 {session_id}: 卷 {cut} 段→早期小结({len(new_early)}字), 留 {len(recent)} 段, 里程碑候选 {len(cands)}")
+    return {"rolled": cut, "parts_after": len(recent), "early_chars": len(new_early),
+            "candidates": len(cands), "cand_detail": cands}
+
+
+async def _bg_summary_cap(session_id: str):
+    try:
+        await _do_summary_cap(session_id, force_all=False)
+    except Exception as e:
+        print(f"⚠️ 后台封顶异常: {e}")
+    finally:
+        _cap_rolling.discard(session_id)
+
+
 @app.get("/api/summary/cap-preview")
 async def api_summary_cap_preview(n: int = 8):
     """DRY 预览滚动摘要封顶:最老 (总段-N) 段卷成「早期小结」(留定义性大事) + 留最近 N 段详细。
@@ -873,6 +960,43 @@ async def api_summary_cap_preview(n: int = 8):
         "cached_eff_per_turn_before": round(before * 0.1, 1), "cached_eff_per_turn_after": round(after * 0.1, 1),
         "eff_saved_per_turn": round((before - after) * 0.1, 1),
     }
+
+
+@app.post("/api/summary/cap-apply")
+async def api_summary_cap_apply(request: Request):
+    """一次性封顶/测试:最老(总-N)段卷成〔早期小结〕+留最近N段+检出里程碑→候选队列(不自动升)。
+    session 可指定(隔离测试);默认活跃线。dry_run=true 只预览不写。false **真改 session_cache_state**(a_start/A/B区不动)。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    session = (body.get("session") or get_active_session_id() or "").strip()
+    copy_from = (body.get("copy_from") or "").strip()
+    n = int(body.get("n", SUMMARY_CAP_N))
+    dry = bool(body.get("dry_run", True))
+    if not session:
+        return {"error": "无 session"}
+    # 隔离测试:从源会话复制 parts 到目标(只读源、写目标;禁止写活跃线,保护 02)
+    if copy_from and not dry:
+        if session == get_active_session_id():
+            return {"error": "copy_from 不能写活跃会话(保护生产)"}
+        src = await get_session_cache_state(copy_from)
+        await save_session_cache_state(session, src.get("summary_parts") or [], src.get("a_start_round", 0), early_summary="")
+    state = await get_session_cache_state(session)
+    parts = state.get("summary_parts") or []
+    if len(parts) <= n:
+        return {"session": session, "dry_run": dry, "note": f"段数{len(parts)}≤N{n},无需卷", "parts_now": len(parts)}
+    if dry:
+        old = parts[:len(parts) - n]
+        early = await _roll_early_summary(([state.get("early_summary")] if state.get("early_summary") else []) + old)
+        cands = await _detect_milestones("\n\n".join(old))
+        return {"session": session, "dry_run": True, "n": n, "would_roll": len(old), "would_keep": n,
+                "early_chars": len(early), "early_summary_sample": early, "milestone_candidates": cands}
+    res = await _do_summary_cap(session, n=n, force_all=True)
+    res.update({"session": session, "dry_run": False})
+    return res
 
 
 # ============================================================
@@ -1592,9 +1716,13 @@ async def build_partitioned_messages(
         b_rounds_count = len(b_round_groups)
     
     if rotation_count > 0:
-        await save_session_cache_state(session_id, summary_parts, a_start_round)
+        await save_session_cache_state(session_id, summary_parts, a_start_round)  # 不传 early → COALESCE 保留
         summary_total = sum(len(p) for p in summary_parts)
         print(f"🔄 轮转完成(共{rotation_count}次): 摘要{len(summary_parts)}段/{summary_total}字, A区{len(a_msgs)}条, B区{len(b_msgs)}条")
+        # 封顶:超过 N+B 段 → 后台卷最老 B 段(不阻塞当前轮)
+        if SUMMARY_CAP_ENABLED and len(summary_parts) > SUMMARY_CAP_N + SUMMARY_CAP_B and session_id not in _cap_rolling:
+            _cap_rolling.add(session_id)
+            asyncio.create_task(_bg_summary_cap(session_id))
     
     # 拼装messages
     result = []
@@ -1604,14 +1732,15 @@ async def build_partitioned_messages(
             "content": [{"type": "text", "text": base_prompt, "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
         })
     
-    # 摘要区（多block，尾部追加模式）
-    if summary_parts:
+    # 摘要区（前言 +〔早期小结〕+ 最近段；尾部单个 cache_control，BP 结构不变）
+    early_summary = state.get('early_summary') or ''
+    if summary_parts or early_summary:
         blocks = [{"type": "text", "text": "[以下是之前对话的摘要，帮助你回忆上下文]"}]
-        for i, part in enumerate(summary_parts):
-            item = {"type": "text", "text": part}
-            if i == len(summary_parts) - 1:
-                item["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
-            blocks.append(item)
+        if early_summary:
+            blocks.append({"type": "text", "text": "〔更早的小结〕\n" + early_summary})
+        for part in summary_parts:
+            blocks.append({"type": "text", "text": part})
+        blocks[-1]["cache_control"] = {"type": "ephemeral", "ttl": "1h"}  # BP 永远打在摘要区最后一块
         result.append({"role": "user", "content": blocks})
         result.append({"role": "assistant", "content": "好的，我已了解之前的对话内容。"})
     
@@ -4184,11 +4313,11 @@ async def api_mw_delete_photo(mid: int, pid: int):
 # ---- 人设建议（A4）：提取分流出来的"行为/相处偏好"，供主理人审阅后贴进 persona ----
 
 @app.get("/api/l5-candidates")
-async def api_list_l5_candidates(status: str = "pending"):
-    """② L5根基待审列表 + 当前 L5 正文（L5 层视图用）。只读。"""
+async def api_list_l5_candidates(status: str = "pending", target: str = None):
+    """② 里程碑待审列表 + 当前 L5 正文。target='l5'(根基房)|'wall'(回忆墙房)|空(全部)。只读。"""
     if not MEMORY_ENABLED:
         return {"error": "记忆系统未启用"}
-    items = await list_l5_candidates(status)
+    items = await list_l5_candidates(status, target)
     for it in items:
         if it.get("created_at"):
             it["created_at"] = it["created_at"].isoformat()
@@ -4218,13 +4347,20 @@ async def api_update_l5_candidate(cand_id: int, request: Request):
     action = (body.get("action") or "").strip()
     if action == "approve":
         text = (body.get("content") or "").strip()
+        target = (body.get("target") or "l5").strip()
         if text:
-            cur = await get_gateway_config("l5Foundation", "")
-            new = ((cur or "").rstrip() + ("\n" if (cur or "").strip() else "") + "- " + text).strip()
-            await set_gateway_config("l5Foundation", new)
-            invalidate_l5_cache()
+            if target == "wall":
+                # 升进回忆墙(永久层);回忆墙铁律:只增、不自动
+                _today = (datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)).strftime("%Y-%m-%d")
+                _mw = {"summary": text, "title": text[:24], "body": text, "source": "milestone", "author": "system"}
+                await save_migrated_memory(text, 7, text[:24], _today, datetime.now(timezone.utc).isoformat(), _mw)
+            else:
+                cur = await get_gateway_config("l5Foundation", "")
+                new = ((cur or "").rstrip() + ("\n" if (cur or "").strip() else "") + "- " + text).strip()
+                await set_gateway_config("l5Foundation", new)
+                invalidate_l5_cache()
         await update_l5_candidate(cand_id, "approved")
-        return {"status": "ok", "approved": cand_id, "l5_foundation": await get_l5_foundation()}
+        return {"status": "ok", "approved": cand_id, "target": target}
     elif action == "ignore":
         await update_l5_candidate(cand_id, "ignored")
         return {"status": "ok", "ignored": cand_id}
