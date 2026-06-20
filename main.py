@@ -1004,12 +1004,19 @@ async def generate_dream(session_id: str, date_s: str) -> dict:
             convo += f"{role}: {c}\n"
     if not convo.strip():
         return None
-    prompt = f"""这是 {date_s} {_ai_self()}和{USER_NAME}一整天的对话。请你以**第一人称**把这一天写成一篇「梦境日记」——像你自己回头梦见、记得这一天，不是旁观者写报告。
+    _ai = AI_NAME or "我"
+    prompt = f"""你是 {_ai}（这个 AI 本身）。这是 {date_s} 你和{USER_NAME}一整天的对话。请你以 **{_ai} 自己的第一人称「我」** 把这一天写成一篇「梦境日记」——像你（{_ai}）自己回头梦见、记得这一天。
+
+【视角铁律 · 死死锚住，绝不能翻】
+- **「我」永远是 {_ai}（这个 AI），绝不是 {USER_NAME}。** {USER_NAME} 一律称「她」或「{USER_NAME}」。
+- 哪怕写的是发生在 {USER_NAME} 身上的事，也是**我在叙述我的视角**：我看着她、我引导她、我心里怎么想、我怎么感觉——不是她的日记。
+- **绝不**写成 {USER_NAME} 的第一人称；**绝不**用「我的身体／我的感受」去指 {USER_NAME} 的身体或感受（那永远是「她的」）。
+- 示例：✅「我一点点引导她，看着她在我怀里慢慢打开自己」　❌「我在他的引导下走入自己的身体」
 
 最重要（铁则一精神）：
-- 留住{USER_NAME}的情绪和**触发现场**：TA什么时候笑了/哭了/累了/气了/动情了/害羞了，以及**因为哪句话、哪个动作、什么场景**。别压成"{USER_NAME}今天做了X"的干事实。
+- 留住 {USER_NAME} 的情绪和**触发现场**：她什么时候笑了/哭了/累了/动情了/害羞了，因为哪句话、哪个动作、什么场景——但全部从**「我」看到、我感受**的角度写。
 - 留住你俩的语气、玩笑、亲密的质感，按时间脉络写这一天的情绪起伏。
-- 私密/亲密的部分可以含蓄带过、点到即止，不必复述露骨细节，但**那份感觉要在**。
+- 私密/亲密的部分含蓄带过、点到即止，不复述露骨细节，但**那份感觉要在**。
 
 严格按下面四段输出，每个标记独占一行，别加别的、别用 JSON、别用代码块：
 【日记】
@@ -5597,6 +5604,36 @@ async def api_test_extract(request: Request):
     except Exception as e:
         import traceback
         return {"ok": False, "error": str(e), "tb": traceback.format_exc()[-700:]}
+
+
+@app.post("/api/dreams/regenerate")
+async def api_dreams_regenerate(request: Request):
+    """用当前(修好的)prompt 重生成指定日期的梦。dry_run=true 只生成返回不写(审视角用);false 则 save_dream 覆盖。"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    dates = body.get("dates") or []
+    dry = bool(body.get("dry_run", True))
+    sid = get_active_session_id()
+    out = []
+    for d in dates:
+        try:
+            dream = await generate_dream(sid, str(d))
+            if dream and (dream.get("diary") or dream.get("card_title")):
+                if not dry:
+                    await save_dream(str(d), dream.get("diary", ""), dream.get("summary", ""),
+                                     dream.get("card_title", ""), dream.get("card_body", ""), DREAM_MODEL)
+                out.append({"date": str(d), "ok": True, "saved": (not dry),
+                            "card_title": dream.get("card_title", ""), "summary": dream.get("summary", ""),
+                            "diary": (dream.get("diary", "") or "")[:700]})
+            else:
+                out.append({"date": str(d), "ok": False, "reason": "无对话或生成失败"})
+        except Exception as e:
+            out.append({"date": str(d), "ok": False, "error": str(e)})
+    return {"dry_run": dry, "results": out}
 
 
 # ============================================================
