@@ -113,6 +113,7 @@ function switchSection(name) {
     }
     if (name === 'manage') {
         loadMemories();   // 进「记忆」房每次重新拉取,避免空表/陈旧
+        loadSelfserveBackup();  // 连根删:显示当前可撤销备份
     }
     if (name === 'feel') {
         loadFeel();
@@ -855,6 +856,90 @@ async function cleanupOldFragments() {
     } catch(e) {
         showManageMsg('error', '❌ ' + e.message);
     }
+}
+
+// ============================================
+// 连根删 · 自助删除（删段对话+碎片 + 备份/撤销 + 重建L2/可选重做梦）
+// ============================================
+function _ssBeijingToUtcIso(localVal) {
+    // datetime-local 的值按北京时间(UTC+8)解释 → UTC ISO（与回滚接口的 UTC 口径一致）
+    if (!localVal) return null;
+    const d = new Date(localVal + ':00+08:00');
+    return isNaN(d.getTime()) ? null : d.toISOString();
+}
+function _ssStartEnd() {
+    const start = _ssBeijingToUtcIso(document.getElementById('ss-start').value);
+    const toNow = document.getElementById('ss-tonow').checked;
+    const end = toNow ? null : _ssBeijingToUtcIso(document.getElementById('ss-end').value);
+    return { start, end };
+}
+async function selfservePreview() {
+    const r0 = document.getElementById('ss-result');
+    const { start, end } = _ssStartEnd();
+    if (!start) { r0.textContent = '请先填「起」时间'; return; }
+    if (!document.getElementById('ss-tonow').checked && !end) { r0.textContent = '未勾「到现在」时，必须填「止」时间'; return; }
+    r0.textContent = '预览中…';
+    try {
+        const resp = await fetch('/api/admin/selfserve-delete', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ start_iso: start, end_iso: end, dry_run: true,
+                rebuild_summary: document.getElementById('ss-summary').checked })
+        });
+        const j = await resp.json();
+        if (j.error) { r0.textContent = '❌ ' + j.error; return; }
+        let s = `【预览·不删】模式：${j.mode}\n会删：${j.convos} 条对话 + ${j.fragments} 条碎片（🛡️回忆墙不在内）\n${j.summary_note || ''}`;
+        if (j.earliest) s += `\n最早：${j.earliest.at}  ${j.earliest.role}｜${j.earliest.head}`;
+        if (j.latest)   s += `\n最晚：${j.latest.at}  ${j.latest.role}｜${j.latest.head}`;
+        r0.textContent = s;
+    } catch(e) { r0.textContent = '❌ ' + e.message; }
+}
+async function selfserveDelete() {
+    const r0 = document.getElementById('ss-result');
+    const { start, end } = _ssStartEnd();
+    if (!start) { r0.textContent = '请先填「起」时间'; return; }
+    if (!document.getElementById('ss-tonow').checked && !end) { r0.textContent = '未勾「到现在」时，必须填「止」时间'; return; }
+    if (!confirm('连根删：删除该段对话+派生碎片（🛡️回忆墙不删）。删前自动备份、可一键撤销。确定继续？')) return;
+    r0.textContent = '删除中…（重压摘要/重做梦时较慢，请稍候）';
+    try {
+        const resp = await fetch('/api/admin/selfserve-delete', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ start_iso: start, end_iso: end, dry_run: false,
+                rebuild_dream: document.getElementById('ss-dream').checked,
+                rebuild_summary: document.getElementById('ss-summary').checked })
+        });
+        const j = await resp.json();
+        if (j.error) { r0.textContent = '❌ ' + j.error + (j.tb ? '\n' + j.tb : ''); return; }
+        let s = `✅ 已删：${j.convos_deleted} 对话 + ${j.fragments_deleted} 碎片`;
+        s += `\nA区摘要：${(j.summary && j.summary.summary_mode) || j.summary_error || '—'}　L2：${j.l2_rebuilt ? '已重建' : (j.l2_error || '—')}`;
+        if (j.dream_redone) s += `\n当天梦已重做：${j.dream_redone}`;
+        s += '\n↩ 可「撤销上次」恢复（在下一次删除前有效）';
+        r0.textContent = s;
+        loadSelfserveBackup();
+        loadMemories();
+    } catch(e) { r0.textContent = '❌ ' + e.message; }
+}
+async function selfserveUndo() {
+    const r0 = document.getElementById('ss-result');
+    if (!confirm('撤销上次连根删：把对话+碎片原样插回、L2/摘要恢复到删前。确定？')) return;
+    r0.textContent = '撤销中…';
+    try {
+        const resp = await fetch('/api/admin/selfserve-undo', { method: 'POST' });
+        const j = await resp.json();
+        if (j.error) { r0.textContent = '❌ ' + j.error; return; }
+        r0.textContent = `↩ 已撤销：插回 ${j.conversations_restored} 对话 + ${j.fragments_restored} 碎片，L2/摘要已恢复`;
+        loadSelfserveBackup();
+        loadMemories();
+    } catch(e) { r0.textContent = '❌ ' + e.message; }
+}
+async function loadSelfserveBackup() {
+    const el = document.getElementById('ss-backup');
+    if (!el) return;
+    try {
+        const j = await (await fetch('/api/admin/selfserve-backup')).json();
+        el.textContent = j.available
+            ? `可撤销：${(j.created_at || '').slice(0,19).replace('T',' ')}（${j.conversations}对话/${j.fragments}碎片）`
+            : '（暂无可撤销备份）';
+    } catch(e) {}
 }
 
 // ============================================

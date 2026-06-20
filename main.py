@@ -32,6 +32,8 @@ from database import get_memories_explicit_flags, set_memory_explicit, get_expli
 from database import get_decay_candidates, count_active_memories, deactivate_memories, archive_decayed_memories, reactivate_decayed_memories
 from database import count_explicit_memories, clear_persona_suggestions, clear_l5_candidates, get_current_mood
 from database import save_dream, get_dream, list_dreams, get_dream_dates, get_memorywall_dates, delete_dream_memories
+from database import count_conversations_between, fetch_conversations_between, delete_conversations_between, restore_conversations
+from database import count_memories_between, fetch_memories_between, delete_memories_between, restore_memories
 from database import save_feel, get_recent_feels, get_all_feels, set_feel_explicit, save_image_memory
 from database import count_conversations_since, delete_conversations_since, count_memories_since, delete_memories_since
 from database import save_persona_suggestion, list_persona_suggestions, update_persona_suggestion, save_l5_candidate, list_l5_candidates, update_l5_candidate
@@ -5520,6 +5522,182 @@ async def api_rollback_session(request: Request):
         return out
     except Exception as e:
         return {"error": str(e)}
+
+
+# ============================================================
+# 连根删 · 自助删除（面板,阮阮自己点）：删区间对话+碎片 → 备份(可撤销) → 修A区摘要 → 重建L2 → 可选重做当天梦
+# ============================================================
+_selfserve_backup = None  # 最近一次删除的内存备份(撤销用;另持久化到 gateway_config[selfserve_last_backup])
+
+
+async def _selfserve_fix_summary(session_id: str, full_rebuild: bool) -> dict:
+    """删后修 A区滚动摘要。full_rebuild=False(尾删):按剩余对话重算应有段数→截断已有段(便宜,不重压,前缀段未变);
+       True(中间删):逐窗 generate_summary 整段重压(慢、含haiku、但干净无残痕)。"""
+    history = await get_conversation_messages(session_id, limit=100000)
+    rounds = group_by_rounds(history)
+    X = CACHE_PARTITION_X
+    state = await get_session_cache_state(session_id)
+    old_parts = state.get("summary_parts") or []
+    n = 0; a_start = 0
+    while True:
+        a_msgs = [m for rnd in rounds[a_start:a_start + X] for m in rnd]
+        if not _should_rotate(len(rounds[a_start + X:]), X, a_msgs):
+            break
+        n += 1; a_start += X
+    if not full_rebuild:
+        new_parts = old_parts[:n]
+        await save_session_cache_state(session_id, new_parts, a_start)
+        return {"summary_mode": "truncate", "parts_before": len(old_parts), "parts_after": len(new_parts), "a_start_round": a_start}
+    new_parts = []; a2 = 0
+    for _ in range(n):
+        a_msgs = [m for rnd in rounds[a2:a2 + X] for m in rnd]
+        s = await generate_summary(a_msgs, session_id)
+        if s:
+            new_parts.append(s)
+        a2 += X
+    await save_session_cache_state(session_id, new_parts, a2)
+    return {"summary_mode": "rebuild", "parts_before": len(old_parts), "parts_after": len(new_parts), "a_start_round": a2}
+
+
+@app.post("/api/admin/selfserve-delete")
+async def api_selfserve_delete(request: Request):
+    """连根删自助:删 [start_iso, end_iso?] 区间的 02 对话(成对) + 派生碎片(回忆墙永不删) + 删前备份(可撤销) +
+    修A区摘要(尾删=截断/中间删=重压或警告) + 重建L2 + 可选重做当天梦。dry_run=true 只预览不动数据。
+    body: {session?, start_iso(UTC), end_iso(UTC|空=到现在), rebuild_dream, rebuild_summary, dry_run}"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    session = (body.get("session") or get_active_session_id() or "").strip()
+    start = (body.get("start_iso") or "").strip()
+    end = (body.get("end_iso") or "").strip() or None
+    dry = bool(body.get("dry_run", True))
+    rebuild_dream = bool(body.get("rebuild_dream", False))
+    rebuild_summary = bool(body.get("rebuild_summary", False))
+    if not session or not start:
+        return {"error": "需要 session + start_iso(UTC)"}
+    try:
+        nconv = await count_conversations_between(session, start, end)
+        nmem = await count_memories_between(session, start, end)
+        is_tail = (end is None)
+        out = {"session": session, "start_iso": start, "end_iso": end,
+               "mode": ("回推到现在(尾删)" if is_tail else "中间段"),
+               "convos": nconv, "fragments": nmem,
+               "rebuild_dream": rebuild_dream, "rebuild_summary": (is_tail or rebuild_summary), "dry_run": dry}
+        if is_tail:
+            out["summary_note"] = "尾删:A区摘要按剩余对话截断(干净、不重压)"
+        elif rebuild_summary:
+            out["summary_note"] = "中间删:整段重压 A区摘要(较慢含haiku,但干净)"
+        else:
+            out["summary_note"] = "⚠️ 中间删且未勾「重压摘要」:A区摘要会保留被删内容的压缩痕迹——建议勾重压,或改用「回推到现在」"
+        if dry:
+            cv = await fetch_conversations_between(session, start, end) if nconv <= 600 else []
+            if cv:
+                out["earliest"] = {"at": cv[0]["created_at"], "role": cv[0]["role"], "head": (cv[0]["content"] or "")[:40]}
+                out["latest"] = {"at": cv[-1]["created_at"], "role": cv[-1]["role"], "head": (cv[-1]["content"] or "")[:40]}
+            return out
+        # —— 真删 ——
+        global _selfserve_backup
+        _st = await get_session_cache_state(session)
+        backup = {"created_at": datetime.now(timezone.utc).isoformat(), "session": session,
+                  "start_iso": start, "end_iso": end,
+                  "conversations": await fetch_conversations_between(session, start, end),
+                  "memories": await fetch_memories_between(session, start, end),
+                  "l2": {"today": _l2_state.get("today", ""), "date": str(_l2_state.get("date") or ""), "bridge": _l2_state.get("bridge", "")},
+                  "summary": {"parts": _st.get("summary_parts") or [], "a_start": _st.get("a_start_round", 0)}}
+        _selfserve_backup = backup
+        await set_gateway_config("selfserve_last_backup", json.dumps(backup, ensure_ascii=False))
+        out["convos_deleted"] = await delete_conversations_between(session, start, end)
+        out["fragments_deleted"] = await delete_memories_between(session, start, end)
+        try:
+            if is_tail:
+                out["summary"] = await _selfserve_fix_summary(session, full_rebuild=False)   # 尾删:干净截断
+            elif rebuild_summary:
+                out["summary"] = await _selfserve_fix_summary(session, full_rebuild=True)    # 中间删:整段重压
+            else:
+                out["summary"] = {"summary_mode": "untouched", "note": "中间删未勾重压:A区摘要保留旧压缩,可能留痕"}
+        except Exception as e:
+            out["summary_error"] = str(e)
+        try:
+            await refresh_l2(session); out["l2_rebuilt"] = True
+        except Exception as e:
+            out["l2_error"] = str(e)
+        if rebuild_dream:
+            try:
+                d = (datetime.fromisoformat(start.replace("Z", "+00:00").replace(" ", "T")) + timedelta(hours=TIMEZONE_HOURS)).strftime("%Y-%m-%d")
+                dr = await generate_dream(session, d)
+                if dr and (dr.get("diary") or dr.get("card_title")):
+                    await save_dream(d, dr.get("diary", ""), dr.get("summary", ""), dr.get("card_title", ""), dr.get("card_body", ""), DREAM_MODEL)
+                    if DREAM_RETRIEVABLE:
+                        await delete_dream_memories(d)
+                        _mw = {"summary": dr.get("summary", ""), "title": dr.get("card_title", ""), "body": dr.get("diary", ""), "source": "dream"}
+                        await save_migrated_memory(dr.get("diary", "")[:2000], 6, dr.get("card_title", ""), d, datetime.now(timezone.utc).isoformat(), _mw)
+                    out["dream_redone"] = d
+            except Exception as e:
+                out["dream_error"] = str(e)
+        out["undo_available"] = True
+        print(f"🗑️ selfserve-delete {session}: 删对话{out['convos_deleted']}+碎片{out['fragments_deleted']} 已备份(可撤销)")
+        return out
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "tb": traceback.format_exc()[-500:]}
+
+
+@app.post("/api/admin/selfserve-undo")
+async def api_selfserve_undo():
+    """撤销上次连根删:对话+碎片原样插回 + L2/摘要恢复到删前。只保留最近一次(再删会覆盖)。"""
+    global _selfserve_backup
+    bk = _selfserve_backup
+    if not bk:
+        raw = await get_gateway_config("selfserve_last_backup", "")
+        if raw:
+            try:
+                bk = json.loads(raw)
+            except Exception:
+                bk = None
+    if not bk:
+        return {"error": "没有可撤销的备份"}
+    try:
+        session = bk.get("session")
+        rc = await restore_conversations(bk.get("conversations") or [])
+        rm = await restore_memories(bk.get("memories") or [])
+        sm = bk.get("summary") or {}
+        await save_session_cache_state(session, sm.get("parts") or [], int(sm.get("a_start") or 0))
+        l2 = bk.get("l2") or {}
+        try:
+            _l2_state["today"] = l2.get("today", ""); _l2_state["date"] = (l2.get("date") or None); _l2_state["bridge"] = l2.get("bridge", "")
+        except Exception:
+            pass
+        await set_gateway_config("l2_today", l2.get("today", "") or "")
+        await set_gateway_config("l2_today_date", l2.get("date", "") or "")
+        await set_gateway_config("l2_bridge", l2.get("bridge", "") or "")
+        _selfserve_backup = None
+        await set_gateway_config("selfserve_last_backup", "")
+        print(f"↩️ selfserve-undo {session}: 插回对话{rc}+碎片{rm}, L2/摘要已恢复")
+        return {"status": "ok", "session": session, "conversations_restored": rc, "fragments_restored": rm, "l2_restored": True, "summary_restored": True}
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "tb": traceback.format_exc()[-500:]}
+
+
+@app.get("/api/admin/selfserve-backup")
+async def api_selfserve_backup_status():
+    """当前可撤销备份的信息(面板显示)。"""
+    bk = _selfserve_backup
+    if not bk:
+        raw = await get_gateway_config("selfserve_last_backup", "")
+        if raw:
+            try:
+                bk = json.loads(raw)
+            except Exception:
+                bk = None
+    if not bk:
+        return {"available": False}
+    return {"available": True, "created_at": bk.get("created_at"), "session": bk.get("session"),
+            "start_iso": bk.get("start_iso"), "end_iso": bk.get("end_iso"),
+            "conversations": len(bk.get("conversations") or []), "fragments": len(bk.get("memories") or [])}
 
 
 @app.post("/api/dreams/regenerate")

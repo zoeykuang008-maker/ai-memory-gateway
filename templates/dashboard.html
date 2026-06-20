@@ -328,6 +328,30 @@
                     </div>
                     <div id="backfill-mem-msg" style="margin-top: 8px;"></div>
                 </div>
+
+                <!-- 连根删 · 自助删除 -->
+                <div class="card" style="margin-top:16px; padding:16px; border:1px solid #c0392b;">
+                    <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px; flex-wrap:wrap;">
+                        <span style="font-size:15px; font-weight:600; color:#c0392b;">🗑️ 连根删 · 自助删除</span>
+                        <span style="font-size:12px; color:var(--text-muted);">删某段对话 + 派生碎片 + 重建L2（🛡️回忆墙永不删；删前自动备份、可一键撤销）</span>
+                    </div>
+                    <div style="display:flex; flex-wrap:wrap; align-items:flex-end; gap:14px; margin-top:8px;">
+                        <label style="font-size:12px; color:var(--text-light);">起（北京时间）<br><input type="datetime-local" id="ss-start" class="form-input" style="width:215px;"></label>
+                        <label style="font-size:12px; color:var(--text-light);">止（北京时间）<br><input type="datetime-local" id="ss-end" class="form-input" style="width:215px;" disabled></label>
+                        <label class="checkbox-label" title="勾上=删到现在（尾删，A区摘要最干净）"><input type="checkbox" id="ss-tonow" checked onchange="document.getElementById('ss-end').disabled=this.checked"><span>到现在</span></label>
+                    </div>
+                    <div style="display:flex; flex-direction:column; gap:8px; margin-top:12px;">
+                        <label class="checkbox-label" style="align-items:flex-start;"><input type="checkbox" id="ss-dream"><span>当天的梦：<b>勾=彻底</b>（按删后内容重做当天梦） / <b>不勾=梦可能留被删内容的痕迹</b></span></label>
+                        <label class="checkbox-label" style="align-items:flex-start;"><input type="checkbox" id="ss-summary"><span>中间删时·<b>重压 A区摘要</b>（慢但干净；<b>不勾=摘要可能留痕</b>）。「到现在」尾删会自动干净截断，无需勾。</span></label>
+                    </div>
+                    <div style="display:flex; gap:10px; margin-top:14px; flex-wrap:wrap;">
+                        <button class="btn btn-sm" onclick="selfservePreview()">① 预览（不删）</button>
+                        <button class="btn btn-danger" onclick="selfserveDelete()">② 连根删</button>
+                        <button class="btn btn-secondary" onclick="selfserveUndo()">↩ 撤销上次</button>
+                        <span id="ss-backup" style="font-size:12px; color:var(--text-muted); align-self:center;"></span>
+                    </div>
+                    <div id="ss-result" style="margin-top:12px; font-size:13px; white-space:pre-wrap; line-height:1.6; color:var(--text-light);"></div>
+                </div>
             </section>
 
             <!-- 合并弹窗 -->
@@ -838,6 +862,6 @@
         </main>
     </div>
 
-    <script src="/static/js/dashboard.js?v=4.6-memfix"></script>
+    <script src="/static/js/dashboard.js?v=4.7-selfdel"></script>
 </body>
 </html>

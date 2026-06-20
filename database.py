@@ -2079,6 +2079,121 @@ async def delete_memories_since(session_id: str, since_iso: str) -> int:
 
 
 # ============================================================
+# 连根删自助:区间 [start, end?] 计数/备份/删除/恢复（end_iso=None=到现在）。回忆墙(mw_meta)永不进删除集。
+# ============================================================
+def _iso(v):
+    try:
+        return v.isoformat() if (v is not None and hasattr(v, "isoformat")) else v
+    except Exception:
+        return v
+
+
+def _rowcount(res):
+    try:
+        return int(str(res).split()[-1])
+    except Exception:
+        return 0
+
+
+async def count_conversations_between(session_id, start_iso, end_iso=None) -> int:
+    s = _parse_utc_dt(start_iso)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if end_iso:
+            return int(await conn.fetchval("SELECT COUNT(*) FROM conversations WHERE session_id=$1 AND created_at>$2 AND created_at<=$3", session_id, s, _parse_utc_dt(end_iso)) or 0)
+        return int(await conn.fetchval("SELECT COUNT(*) FROM conversations WHERE session_id=$1 AND created_at>$2", session_id, s) or 0)
+
+
+async def fetch_conversations_between(session_id, start_iso, end_iso=None) -> list:
+    s = _parse_utc_dt(start_iso)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if end_iso:
+            rows = await conn.fetch("SELECT session_id, role, content, model, created_at, metadata FROM conversations WHERE session_id=$1 AND created_at>$2 AND created_at<=$3 ORDER BY created_at", session_id, s, _parse_utc_dt(end_iso))
+        else:
+            rows = await conn.fetch("SELECT session_id, role, content, model, created_at, metadata FROM conversations WHERE session_id=$1 AND created_at>$2 ORDER BY created_at", session_id, s)
+    return [{"session_id": r["session_id"], "role": r["role"], "content": r["content"],
+             "model": r["model"], "created_at": _iso(r["created_at"]), "metadata": r["metadata"]} for r in rows]
+
+
+async def delete_conversations_between(session_id, start_iso, end_iso=None) -> int:
+    s = _parse_utc_dt(start_iso)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if end_iso:
+            res = await conn.execute("DELETE FROM conversations WHERE session_id=$1 AND created_at>$2 AND created_at<=$3", session_id, s, _parse_utc_dt(end_iso))
+        else:
+            res = await conn.execute("DELETE FROM conversations WHERE session_id=$1 AND created_at>$2", session_id, s)
+    return _rowcount(res)
+
+
+async def restore_conversations(rows) -> int:
+    if not rows:
+        return 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        for r in rows:
+            await conn.execute(
+                "INSERT INTO conversations (session_id, role, content, model, created_at, metadata) VALUES ($1,$2,$3,$4,$5::text::timestamptz,$6)",
+                r.get("session_id"), r.get("role"), r.get("content"), r.get("model"),
+                (str(r["created_at"]) if r.get("created_at") else None), r.get("metadata"))
+    return len(rows)
+
+
+async def count_memories_between(session_id, start_iso, end_iso=None) -> int:
+    s = _parse_utc_dt(start_iso)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if end_iso:
+            return int(await conn.fetchval("SELECT COUNT(*) FROM memories WHERE source_session=$1 AND created_at>$2 AND created_at<=$3 AND mw_meta IS NULL", session_id, s, _parse_utc_dt(end_iso)) or 0)
+        return int(await conn.fetchval("SELECT COUNT(*) FROM memories WHERE source_session=$1 AND created_at>$2 AND mw_meta IS NULL", session_id, s) or 0)
+
+
+async def fetch_memories_between(session_id, start_iso, end_iso=None) -> list:
+    s = _parse_utc_dt(start_iso)
+    cols = "content, importance, source_session, created_at, layer, title, is_active, valence, arousal, event_date"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if end_iso:
+            rows = await conn.fetch(f"SELECT {cols} FROM memories WHERE source_session=$1 AND created_at>$2 AND created_at<=$3 AND mw_meta IS NULL ORDER BY created_at", session_id, s, _parse_utc_dt(end_iso))
+        else:
+            rows = await conn.fetch(f"SELECT {cols} FROM memories WHERE source_session=$1 AND created_at>$2 AND mw_meta IS NULL ORDER BY created_at", session_id, s)
+    return [{"content": r["content"], "importance": r["importance"], "source_session": r["source_session"],
+             "created_at": _iso(r["created_at"]), "layer": r["layer"], "title": r["title"],
+             "is_active": r["is_active"], "valence": r["valence"], "arousal": r["arousal"],
+             "event_date": _iso(r["event_date"])} for r in rows]
+
+
+async def delete_memories_between(session_id, start_iso, end_iso=None) -> int:
+    s = _parse_utc_dt(start_iso)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if end_iso:
+            res = await conn.execute("DELETE FROM memories WHERE source_session=$1 AND created_at>$2 AND created_at<=$3 AND mw_meta IS NULL", session_id, s, _parse_utc_dt(end_iso))
+        else:
+            res = await conn.execute("DELETE FROM memories WHERE source_session=$1 AND created_at>$2 AND mw_meta IS NULL", session_id, s)
+    return _rowcount(res)
+
+
+async def restore_memories(rows) -> int:
+    if not rows:
+        return 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        for r in rows:
+            await conn.execute(
+                "INSERT INTO memories (content, importance, source_session, created_at, layer, title, is_active, valence, arousal, event_date) "
+                "VALUES ($1,$2,$3,$4::text::timestamptz,$5,$6,$7,$8,$9,$10::text::date)",
+                r.get("content"), (r.get("importance") or 5), r.get("source_session"),
+                (str(r["created_at"]) if r.get("created_at") else None),
+                (r.get("layer") or 1), r.get("title"),
+                (r.get("is_active") if r.get("is_active") is not None else True),
+                (r.get("valence") or 0), (r.get("arousal") if r.get("arousal") is not None else 0.2),
+                (str(r["event_date"]) if r.get("event_date") else None))
+    return len(rows)
+
+
+# ============================================================
 # Token 使用记录
 # ============================================================
 
