@@ -212,7 +212,7 @@ body {
 
 .table-card {
     padding: 0;
-    overflow: hidden;
+    overflow-x: auto;   /* 桌面端列多放不下时横向滚动,「操作」列完整可见可点(原 overflow:hidden 会裁掉) */
 }
 
 /* ============================================
@@ -400,6 +400,11 @@ body {
 .col-source { width: 110px; font-size: 12px; color: var(--text-muted); }
 .col-time { width: 160px; font-size: 12px; color: var(--text-muted); }
 .col-actions { width: 150px; }
+
+/* 桌面端:表格保持完整宽度,放不下时随 .table-card 横向滚到「操作」列(手机端 ≤768 不受影响,那套已正常) */
+@media (min-width: 769px) {
+    .data-table { min-width: 1080px; }
+}
 
 /* 表格内输入框 */
 .content-textarea {

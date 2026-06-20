@@ -90,7 +90,7 @@ importance 为 1-10（10最重要）；valence∈[-1,1]、arousal∈[0,1]；is_m
 """
 
 
-async def extract_memories(messages: List[Dict[str, str]], existing_memories: List[str] = None) -> List[Dict]:
+async def extract_memories(messages: List[Dict[str, str]], existing_memories: List[str] = None, user_name: str = "用户") -> List[Dict]:
     """
     从对话消息中提取记忆
 
@@ -116,7 +116,7 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
         if isinstance(content, list):  # 多模态兜底:只取文本块、丢图片(image_url 的 base64),否则灌爆提取 prompt→不出碎片
             content = " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
         if role == "user":
-            conversation_text += f"用户: {content}\n"
+            conversation_text += f"{user_name}: {content}\n"
         elif role == "assistant":
             conversation_text += f"AI: {content}\n"
 
@@ -137,6 +137,9 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
 
     # 把已有记忆填入prompt
     prompt = EXTRACTION_PROMPT.format(existing_memories=memories_text)
+    # 单用户实例:碎片主语用配置的名字(如阮阮);朋友空白部署 user_name="用户"→不替换,保持通用
+    if user_name and user_name != "用户":
+        prompt = prompt.replace("用户", user_name)
 
     # 调用 LLM 提取记忆
     try:

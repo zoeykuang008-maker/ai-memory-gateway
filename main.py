@@ -2239,7 +2239,7 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
         
         messages_for_extraction = _msgs_text_only(messages_for_extraction)  # 多模态兜底:绝不把图 base64 喂提取/feel(否则不出碎片)
 
-        new_memories = await extract_memories(messages_for_extraction, existing_memories=existing_contents)
+        new_memories = await extract_memories(messages_for_extraction, existing_memories=existing_contents, user_name=USER_NAME)
 
         # ③-1 feel：同一段顺带写一句"留在你心里的感受"(单独存、不衰减；默认关到验收)
         if FEEL_ENABLED:
